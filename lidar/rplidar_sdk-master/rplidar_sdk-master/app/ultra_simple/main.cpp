@@ -23,6 +23,8 @@
 #include "lidar_lib.h"
 #include "sl_lidar.h" 
 #include "sl_lidar_driver.h"
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -57,11 +59,55 @@ int client_sock = -1;
 bool ctrl_c_pressed;
 void ctrlc(int) { ctrl_c_pressed = true; }
 
+using json = nlohmann::json;
+
+void afficherTousLesChamps(const json& json_data) {
+
+    // Variables locales
+    float x, y, angle;
+    bool equipe;
+
+    // Copie des valeurs depuis le JSON
+    x = json_data["robot"]["x"];
+    y = json_data["robot"]["y"];
+    angle = json_data["robot"]["angle"];
+
+    equipe = json_data["equipe"];;  // "1" -> true, "0" -> false
+
+    // Affichage des valeurs
+    std::cout << "Robot - x: " << x << ", y: " << y << ", angle: " << angle << std::endl;
+    std::cout << "Équipe: " << (equipe ? "true" : "false") << std::endl;
+}
+
+void lireFichierJSON() {
+
+    std::string jsonpath = "/home/raspi/Desktop/CDF/init_prog/init_data.json";
+    std::ifstream json_file(jsonpath);
+
+    if (!json_file.is_open()) {
+        std::cerr << "Erreur : impossible d'ouvrir le fichier JSON : " << jsonpath << std::endl;
+        return;
+    }
+
+    json json_data;
+    try {
+        json_file >> json_data;
+    } catch (const json::parse_error& e) {
+        std::cerr << "Erreur de parsing JSON : " << e.what() << std::endl;
+        json_file.close();
+        return;
+    }
+
+    json_file.close();
+    afficherTousLesChamps(json_data);
+}
 
 // --- Boucle principale du robot ---
 void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& posImu, position& poslidar, int& client_sock, int& server_sock) {
+    
     std::vector<float> scan(NUM_ANGLES, -1.0f);
     std::vector<TrackResult> trackedPoints;
+
     inittrackedpoints(trackedPoints, posrobot, 3);
     ImuPose p_init_imu = position_to_imu(posrobot);
     imu.writePose(p_init_imu);
@@ -151,6 +197,7 @@ void cleanup(ILidarDriver* drv, int opt_channel_type) {
 
 // --- Fonction principale refactorisée ---
 int main() {
+    lireFichierJSON() ;
     // Initialisation du socket serveur
     fcntl(server_sock, F_SETFL, O_NONBLOCK);
     init_socket(server_sock, client_sock, addr ,socket_path);
