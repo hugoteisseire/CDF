@@ -15,12 +15,19 @@ using namespace sl;
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
 #endif
-
+/*
 const std::vector<position> pillars = {
     {3094, 50, 0},
     {3094, 1950, 0},
     {-94, 1000, 0}
+};*/
+const std::vector<position> pillars = {
+    {2950, 50, 0},
+    {2950, 1950, 0},
+    {50, 1000, 0}
 };
+
+
 
 ImuPose position_to_imu(const position& pos) {
     ImuPose p;
@@ -172,7 +179,7 @@ void trackPoints(const std::vector<float>& scan,
         float dx = x - pillars[p].x;
         float dy = y - pillars[p].y;
         float error = sqrt(dx*dx + dy*dy);
-        if (error > 250) {
+        if (error > 350) {
             best.found = false;
         }
         trackedPoints[p] = best;
@@ -204,7 +211,7 @@ float findcenter(const std::vector<float>& scan, float angle, float distance) {
 
     float angle_rad = angle; // conversion en radians
     float angle_deg = angle * 180.0f / PI; // conversion en degrés
-    float angle_span = atan2(100.0f, distance) * 180.0f / PI; // angle de recherche en degrés (rayon 100 mm)
+    float angle_span = atan2(150.0f, distance) * 180.0f / PI; // angle de recherche en degrés (rayon 100 mm)
     int start_index = static_cast<int>(std::round((angle_deg - angle_span) / RESOLUTION));
     int end_index = static_cast<int>(std::round((angle_deg + angle_span) / RESOLUTION));
 

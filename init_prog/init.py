@@ -25,7 +25,8 @@ with open("init_data.json", "w") as f:
 current_dir = os.getcwd()
 path_to_c_program = os.path.join(
     current_dir, "../lidar/rplidar_sdk-master/rplidar_sdk-master/output/Linux/Release/ultra_simple")
-proc = subprocess.Popen([path_to_c_program])
+proc = subprocess.Popen(["xterm", "-e", path_to_c_program])
+
 
 # 4. Le script Python peut continuer à faire autre chose ici
 print("Programme C lancé en parallèle. Le script Python continue...")

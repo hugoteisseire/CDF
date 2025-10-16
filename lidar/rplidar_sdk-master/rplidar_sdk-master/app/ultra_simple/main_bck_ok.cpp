@@ -25,7 +25,6 @@
 #include "sl_lidar_driver.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <deque>   // ajouté pour historiser les positions
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -103,32 +102,11 @@ void lireFichierJSON() {
     afficherTousLesChamps(json_data);
 }
 
-// helper : moyenne d'un deque<position>
-static position average_position(const std::deque<position>& dq) {
-    position sum;
-    sum.x = 0.0f; sum.y = 0.0f; sum.angle = 0.0f;
-    for (const auto &p : dq) {
-        sum.x += p.x;
-        sum.y += p.y;
-        sum.angle += p.angle;
-    }
-    if (dq.empty()) return sum;
-    float n = static_cast<float>(dq.size());
-    sum.x /= n;
-    sum.y /= n;
-    sum.angle /= n;
-    return sum;
-}
-
 // --- Boucle principale du robot ---
 void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& posImu, position& poslidar, int& client_sock, int& server_sock) {
     
     std::vector<float> scan(NUM_ANGLES, -1.0f);
     std::vector<TrackResult> trackedPoints;
-
-    // historique des dernières positions lidar (pour lissage)
-    std::deque<position> pos_history;
-    const size_t SMOOTH_N = 5; // nombre d'échantillons pour le lissage
 
     inittrackedpoints(trackedPoints, posrobot, 3);
     ImuPose p_init_imu = position_to_imu(posrobot);
@@ -141,11 +119,9 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
     std::cout << "Début boucle principale\n";
     std::cout << std::fixed << std::setprecision(5);
     ImuPose pose;
-    ImuPose speed;
+
     try_accept_client(client_sock, server_sock);
-    int count=0; // compteur de mesures consécutives avec au moins 3 piliers détectés
-    const int COUNT_THRESHOLD = 20;        // nombre d'itérations consécutives requises
-    const float SPEED_THRESHOLD = 0.02f;   // m/s, seuil pour considérer le robot "lent"
+
     while (!ctrl_c_pressed) {
         // Communication socket : envoi de la position IMU
         if (client_sock >= 0) {
@@ -193,43 +169,13 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
         }
 
         poslidar = computePose(trackedPoints.data());
-        // je veut lisser la pos sur les 5 dernieres positions
-        pos_history.push_back(poslidar);
-        if (pos_history.size() > SMOOTH_N) pos_history.pop_front();
 
-        // calculer la moyenne des dernières positions et l'utiliser comme poslidar lissée
-        position smoothed = average_position(pos_history);
-        poslidar = smoothed;
-
-        if (pillardetected >= 2) {
-            count++;
-            // si on a COUNT_THRESHOLD mesures consécutives avec >= 2 piliers détectés,
-            // on met à jour l'IMU (mais seulement si le robot est suffisamment lent)
-            if (count >= COUNT_THRESHOLD) {
-                // lire la vitesse (vérifier que la lecture réussit si la méthode retourne bool)
-                if (imu.readVelocity(speed)) { // adapter si readVelocity a une autre signature
-                    float speed_norm = std::hypot(speed.x, speed.y); // norme (m/s)
-                    std::cout << " => Vitesse IMU: vx=" << speed.x << " m/s, vy=" << speed.y
-                        << " m/s, norme=" << speed_norm << " m/s\n";
-                    if (speed_norm < SPEED_THRESHOLD) {
-                        // on met à jour la pose IMU avec la pose LIDAR lissée
-                        posrobot = poslidar;
-                        ImuPose p = position_to_imu(posrobot);
-                        imu.writePose(p);
-
-                    }
-                } else {
-                    std::cerr << "Warning: impossible de lire la vitesse IMU\n";
-                }
-                count = 0;
-            }
-        } else {
-            count = 0;
+        if (pillardetected >= 5) {
+            posrobot = poslidar;
+            ImuPose p = position_to_imu(posrobot);  
+            imu.writePose(p);     
         }
-        imu.readVelocity(speed);
-        float speed_norm = std::hypot(speed.x, speed.y); // norme (m/s)
-        std::cout << " => Vitesse IMU: vx=" << speed.x << " m/s, vy=" << speed.y
-                        << " m/s, norme=" << speed_norm << " m/s\n";
+
         std::cout << "\n=> Pose calculée: x=" << poslidar.x << " mm, y=" << poslidar.y
             << " mm, angle=" << poslidar.angle * 180.0f / M_PI << "°\n";
         std::cout << "=> Pose IMU: x=" << posImu.x << " mm, y=" << posImu.y

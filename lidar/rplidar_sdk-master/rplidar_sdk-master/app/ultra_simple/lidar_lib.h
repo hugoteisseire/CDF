@@ -24,7 +24,7 @@ struct TrackResult {
 };
 
 
-constexpr int RAYON_PILIER = 50;             // en mm
+constexpr int RAYON_PILIER = 16;             
 constexpr float RESOLUTION = 0.25f;
 constexpr int NUM_ANGLES = static_cast<int>(360.0f / RESOLUTION);
 extern const std::vector<position> pillars;
