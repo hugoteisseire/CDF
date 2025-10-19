@@ -7,9 +7,12 @@
 #include <errno.h>
 #include <iostream>
 #include <thread>
+#include <chrono>  
 
 #include "sl_lidar.h" 
 #include "sl_lidar_driver.h"
+
+using namespace std::chrono;
 
 using namespace sl;
 #ifndef _countof
@@ -135,6 +138,69 @@ position computePose(TrackResult *meas) {
     }
 
     return pose;
+}
+
+void point_in_table(const std::vector<float>& scan,std::vector<position>& points_in_table, float resolution,position robot){
+  //boucle parcourant scan
+    for(int i=0;i<scan.size();i++){
+        if(scan[i]>0){
+        float angle=(float)(i*resolution)*PI/180.0f+robot.angle; //angle en radian
+        float x=robot.x+((scan[i])*cos(angle));
+        float y=robot.y+((scan[i])*sin(angle));
+        if(x>=0 && x<=3000 && y>=0 && y<=2000){ //si le point est dans la table
+
+            position p;
+            p.x=x;
+            p.y=y;
+            points_in_table.push_back(p);
+        }
+        
+        }
+    }
+
+}
+
+void point_in_table2(const std::vector<float>& scan, 
+                    std::vector<position>& points_in_table,
+                    float resolution, 
+                    const position& robot)
+{   points_in_table.clear();
+    points_in_table.reserve(scan.size());  // évite réallocations
+
+    const float res_rad = resolution * PI / 180.0f; // une seule fois
+    float cos_r = std::cos(robot.angle);
+    float sin_r = std::sin(robot.angle);
+
+    // pré-calcule cos/sin du pas angulaire
+    const float cos_step = std::cos(res_rad);
+    const float sin_step = std::sin(res_rad);
+
+    // angle initial (orientation robot)
+    float cos_a = cos_r;
+    float sin_a = sin_r;
+
+    for (int i = 0; i < (int)scan.size(); ++i) {
+        float r = scan[i];
+        if (r > 0 && r < 3700) { // filtre distance max 6m
+            float dist = r;
+            float x = robot.x + dist * cos_a;
+            float y = robot.y + dist * sin_a;
+
+            // test AABB (table 3000 x 2000)
+            if (x >= 0 && x <= 3000 && y >= 0 && y <= 2000) {
+                position p;
+                p.x = x;
+                p.y = y;
+                points_in_table.push_back(p);
+            }
+
+        }
+
+        // rotation incrémentale : (cos, sin) = rotation(angle + res_rad)
+        float tmp_cos = cos_a * cos_step - sin_a * sin_step;
+        sin_a = sin_a * cos_step + cos_a * sin_step;
+        cos_a = tmp_cos;
+    }
 }
 
 
@@ -328,8 +394,11 @@ bool grabAndUpdateScan(std::vector<float>& scan, sl::ILidarDriver* drv) {
     size_t count = _countof(nodes);
 
     // Récupération des données
+    auto t3 = high_resolution_clock::now();
     sl_result op_result = drv->grabScanDataHq(nodes, count);
-
+    auto t4 = high_resolution_clock::now();
+    auto duration = duration_cast<milliseconds>(t4 - t3).count();
+    std::cout << "Durée acquisition scan: " << duration << " ms\n";
     if (SL_IS_OK(op_result)) {
         for (size_t pos = 0; pos < count; ++pos) {
             // Conversion angle Q14 -> degrés
@@ -342,11 +411,11 @@ bool grabAndUpdateScan(std::vector<float>& scan, sl::ILidarDriver* drv) {
             int quality = nodes[pos].quality >> SL_LIDAR_RESP_MEASUREMENT_QUALITY_SHIFT;
 
             int index = static_cast<int>(std::round(angle / RESOLUTION));
+            // je retourne le scan , 1° devient 359°
+            index = (NUM_ANGLES - index) % NUM_ANGLES;
             // Seulement si qualité > 0
             if (quality > 0) {
                 if (index >= NUM_ANGLES) index = 0; // sécurité pour 360°
-                // je retourne le scan , 1° devient 359°
-                index = (NUM_ANGLES - index) % NUM_ANGLES;
 
                 // Écrase la valeur précédente
                 scan[index] = distance;

@@ -46,6 +46,13 @@ void trackPoints(const std::vector<float>& scan,
 
 void inittrackedpoints(std::vector<TrackResult>& trackedPoints, position pos, int numPoints);
 
+                        
+void point_in_table2(const std::vector<float>& scan, 
+                    std::vector<position>& points_in_table,
+                    float resolution, 
+                    const position& robot);
+void point_in_table(const std::vector<float>& scan,std::vector<position>& points_in_table, float resolution,position robot);
+
 
 // cette fontion a pourbut de trouver le centre du pilier( d=100mm)
 // deja trouver a angle et distance, adapter le span de recherche en fonction

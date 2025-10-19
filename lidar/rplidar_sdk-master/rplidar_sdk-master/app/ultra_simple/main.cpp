@@ -26,6 +26,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <deque>   // ajouté pour historiser les positions
+#include <chrono>  
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -59,6 +60,7 @@ int client_sock = -1;
 // Flag d'arrêt via Ctrl+C
 bool ctrl_c_pressed;
 void ctrlc(int) { ctrl_c_pressed = true; }
+using namespace std::chrono;
 
 using json = nlohmann::json;
 
@@ -167,9 +169,15 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
             std::cerr << "Erreur lecture pose\n";
         }
         posrobot = posImu;
-
+        auto t3 = high_resolution_clock::now();
         // Acquisition et traitement du scan LIDAR
         grabAndUpdateScan(scan, drv);
+        auto t4 = high_resolution_clock::now(); 
+        auto duration = duration_cast<milliseconds>(t4 - t3).count();
+        std::cout << "Durée acquisition et traitement du scan LIDAR: " << duration << " ms\n";
+        std::vector<position> points_in_table;
+        point_in_table2(scan, points_in_table, RESOLUTION, posrobot);
+        std::cout << "Nombre de points dans la table: " << points_in_table.size() << std::endl;
         trackPoints(scan, trackedPoints, RESOLUTION, posrobot);
 
         int pillardetected = 0;
@@ -237,6 +245,7 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
         std::cout << "=> delta position: dx=" << (poslidar.x - posImu.x)
             << " mm, dy=" << (poslidar.y - posImu.y)
             << " mm, dangle=" << (poslidar.angle - posImu.angle) * 180.0f / M_PI << "°\n";
+
     }
 }
 
