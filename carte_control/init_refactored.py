@@ -13,7 +13,7 @@ import socket
 import select
 from typing import Callable, Optional, Dict
 from dataclasses import dataclass
-
+import digitalio
 try:
     import board
     import busio
@@ -63,7 +63,7 @@ class ControlBoard:
         try:
             i2c = busio.I2C(board.SCL, board.SDA)
             self.mcp1 = MCP23017(i2c, address=0x20)
-            self.mcp2 = MCP23017(i2c, address=0x21)
+            self.mcp2 = MCP23017(i2c, address=0x25)
             self._configure_pins()
             logger.info("MCP23017 initialisés avec succès")
         except Exception as e:
@@ -124,7 +124,7 @@ class ControlBoard:
         ]
         for pin in output_pins:
             pin.direction = Direction.OUTPUT
-        
+       
         # MCP1 Port B : entrées
         self.sw_spare_1 = self.mcp1.get_pin(8)
         self.sw_spare_2 = self.mcp1.get_pin(9)
@@ -141,19 +141,17 @@ class ControlBoard:
         ]
         for pin in input_pins:
             pin.direction = Direction.INPUT
-            pin.pull = Pull.DOWN
         
         # MCP2
-        self.sw_team = self.mcp2.get_pin(0)
-        self.buzzer = self.mcp2.get_pin(1)
-        self.sw_sel_1 = self.mcp2.get_pin(2)
-        self.sw_sel_2 = self.mcp2.get_pin(3)
-        self.sw_sel_3 = self.mcp2.get_pin(4)
-        
+        self.sw_team = self.mcp2.get_pin(8)
+        self.buzzer = self.mcp2.get_pin(9)
+        self.sw_sel_1 = self.mcp2.get_pin(10)
+        self.sw_sel_2 = self.mcp2.get_pin(11)
+        self.sw_sel_3 = self.mcp2.get_pin(12)
+
         self.buzzer.direction = Direction.OUTPUT
         for pin in [self.sw_team, self.sw_sel_1, self.sw_sel_2, self.sw_sel_3]:
             pin.direction = Direction.INPUT
-            pin.pull = Pull.DOWN
     
     # ================================
     # LED HELPERS
