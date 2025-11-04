@@ -7,7 +7,7 @@ from lib_moteur import read_motor_speed,read_motor_position,move_relative,reset_
 #servo.set_work_mode(WorkMode.SrvFoc)
 
 # Initialise l'interface CAN
-bus = can.interface.Bus(interface="socketcan", channel="can0", bitrate=1000000)
+bus = can.interface.Bus(interface="socketcan", channel="can0", bitrate=500000)
 notifier = can.Notifier(bus, [])
 bus.socket.setblocking(False)
 # Crée les objets moteur
@@ -18,9 +18,11 @@ print(servo1.set_subdivisions(16))
 print(servo3.set_subdivisions(16))
 print(servo2.set_subdivisions(16))
 time.sleep(1)
-print(servo3.b_calibrate_encoder())
-print(servo2.b_calibrate_encoder())
 print(servo1.b_calibrate_encoder())
+time.sleep(1)
+print(servo3.b_calibrate_encoder())
+time.sleep(1)
+print(servo2.b_calibrate_encoder())
 time.sleep(10)
 
 #reset_zero(bus, can_id=0x01)

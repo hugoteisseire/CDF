@@ -27,6 +27,8 @@
 #include <nlohmann/json.hpp>
 #include <deque>   // ajouté pour historiser les positions
 #include <chrono>  
+#include "rpi_pwm.h"
+#include <stdint.h>
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -56,6 +58,11 @@ const char *socket_path = "/tmp/robot.sock";
 int server_sock = socket(AF_UNIX, SOCK_STREAM, 0);
 struct sockaddr_un addr;
 int client_sock = -1;
+
+int channel_pwm = 2;
+int frequency_pwm = 20000; // Hz
+RPI_PWM pwm_lidar;
+
 
 // Flag d'arrêt via Ctrl+C
 bool ctrl_c_pressed;
@@ -268,6 +275,10 @@ int main() {
     fcntl(server_sock, F_SETFL, O_NONBLOCK);
     init_socket(server_sock, client_sock, addr ,socket_path);
 
+    pwm_lidar.start(channel_pwm, frequency_pwm);
+    pwm_lidar.setDutyCycle(50);
+
+
     // Initialisation des positions
     position poslidar, posImu, posrobot;
     position p_init(2200, 1000, 0);
@@ -280,7 +291,7 @@ int main() {
     // Initialisation des arguments LIDAR
     int argc = 5;
     const char *argv[] = {
-        "./ultra_simple", "--channel", "--serial", "/dev/ttyUSB0", "256000"
+        "./ultra_simple", "--channel", "--serial", "/dev/serial0", "256000"
     };
 
     // Initialisation du driver LIDAR
