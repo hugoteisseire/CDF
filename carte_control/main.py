@@ -14,12 +14,13 @@ import sys
 import os
 
 # Imports locaux
+from carte_control.config import STATE_ERROR, STATE_OK, STATE_WARNING
 from config import HARDWARE_AVAILABLE, setup_logging
 from control_board import ControlBoard
 from board_actuation import BoardActuationThread
 from input_poller import InputPoller
 from process_manager import ProcessManager
-from unix_socket_thread import UnixSocketThread
+from unix_socket_thread import UnixSocketServerThread, LidarSocket
 from callbacks import (
     on_tirette_falling,
     on_bp_rst_lidar_rising,
@@ -74,25 +75,30 @@ def main():
     # EXEMPLE: Démarrage de programmes externes
     # ======================================
     
-    # Programmes Python
-    # lidar_proc = process_manager.start_python('/home/pi/lidar/main.py', name='LIDAR')
+    # Thread socket LIDAR (serveur Python, attend les clients)
+    lidar_socket = LidarSocket("/tmp/robot.sock", stop_event)
+    lidar_socket.start()
+    logger.info("🎯 Serveur socket LIDAR démarré")
+    
+    # Laisser le temps au socket d'être créé
+    time.sleep(0.5)
+    
+    # Programme LIDAR simulateur C (client, se connecte au socket Python)
+    lidar_executable = '/home/raspi/Desktop/CDF/carte_control/simu_lidar/test_lidar_socket'
+    lidar_proc = process_manager.start_c_program(lidar_executable, name='LIDAR_SIM')
+    
+    if not lidar_proc:
+        logger.warning("⚠️  Programme LIDAR non démarré (normal en développement)")
+    else:
+        logger.info("✅ Simulateur LIDAR démarré")
+    
+    # Autres programmes (exemples commentés)
     # vision_proc = process_manager.start_python(
     #     '/home/pi/vision/detect.py',
     #     args=['--mode', 'auto'],
     #     name='Vision'
     # )
-    
-    # Programmes C compilés
-    # imu_proc = process_manager.start_c_program('/home/pi/imu/imu_server', name='IMU')
-    # motor_proc = process_manager.start_c_program(
-    #     '/home/pi/motors/motor_control',
-    #     args=['--can', 'can0'],
-    #     name='Motors'
-    # )
-    
-    # Threads socket (pour communiquer avec les programmes ci-dessus)
-    # lidar_socket = UnixSocketThread("/tmp/lidar.sock", stop_event)
-    # lidar_socket.start()
+
     
     board.set_state_ok()
     logger.info("✅ Système prêt")
@@ -108,7 +114,7 @@ def main():
         # Arrêt des threads
         poller.join(timeout=2.0)
         actuator.join(timeout=2.0)
-        # lidar_socket.join(timeout=2.0)
+        lidar_socket.join(timeout=2.0)
         
         logger.info("🔴 Arrêt terminé")
     
@@ -118,8 +124,27 @@ def main():
     
     try:
         while True:
-            # Affichage des sélections (optionnel, peut être retiré en prod)
-            print(f"Switch selections: {board.get_switch_selections()}")
+            # Affichage de l'état LIDAR
+            if lidar_socket.is_data_fresh():
+                state = lidar_socket.get_state()
+                
+                if state== 'init':
+                    board.change_lidar_state(STATE_WARNING)
+                elif state== 'running':
+                    board.change_lidar_state(STATE_OK)
+                elif state== 'error':
+                    board.change_lidar_state(STATE_ERROR)
+                elif state== 'lost':
+                    board.change_lidar_state(STATE_WARNING)
+                
+                print(f"\n{'='*50}")
+                print(f" État LIDAR: {state.upper()}")
+    
+                print(f"🔄  Switches: {board.get_switch_selections()}")
+
+            else:
+                print("⏳ En attente des données LIDAR...")
+            
             time.sleep(1)
             
             # Le check I2C est géré par BoardActuationThread
@@ -138,3 +163,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
