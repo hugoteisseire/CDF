@@ -232,5 +232,13 @@ class ControlBoard:
     def get_switch_selections(self) -> int:
         """Retourne la position des switches de sélection (3 bits)."""
         return self.sw_sel
-    def change_lidar_state(self,state):
-        self.state_lidar=state
+    
+    def get_switch_selection(self) -> int:
+        """Alias pour get_switch_selections (retourne sw_sel 0-7)."""
+        return self.sw_sel
+    
+    def change_lidar_state(self, state):
+        self.state_lidar = state
+    
+    def get_team(self):
+        return self.team    

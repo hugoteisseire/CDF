@@ -14,10 +14,16 @@ logger = logging.getLogger(__name__)
 class ProcessManager:
     """Gestionnaire de processus externes (Python, C, etc.)"""
     
-    def __init__(self):
+    def __init__(self, log_dir: str = "/tmp/carte_control_logs"):
         self.processes: List[Dict] = []
+        self.log_dir = log_dir
+        self.broadcast_socket = None  # Référence optionnelle au socket broadcast
+        
+        # Créer le répertoire de logs s'il n'existe pas
+        os.makedirs(self.log_dir, exist_ok=True)
+        logger.info(f"📁 Logs des processus dans: {self.log_dir}")
     
-    def start_process(self, command: List[str], name: Optional[str] = None, shell: bool = False) -> Optional[subprocess.Popen]:
+    def start_process(self, command: List[str], name: Optional[str] = None, shell: bool = False, log_to_file: bool = False) -> Optional[subprocess.Popen]:
         """
         Lance un processus externe.
         
@@ -25,25 +31,48 @@ class ProcessManager:
             command: Liste ['programme', 'arg1', 'arg2'] ou string si shell=True
             name: Nom pour identification (optionnel)
             shell: Si True, exécute via shell
+            log_to_file: Si True, redirige stdout/stderr vers des fichiers de log
         
         Returns:
             subprocess.Popen object ou None si erreur
         """
         try:
+            proc_name = name or (command[0] if isinstance(command, list) else str(command))
+            
+            # Configuration des flux de sortie
+            if log_to_file:
+                # Créer des fichiers de log pour stdout et stderr
+                stdout_log = open(os.path.join(self.log_dir, f"{proc_name}_stdout.log"), 'w')
+                stderr_log = open(os.path.join(self.log_dir, f"{proc_name}_stderr.log"), 'w')
+                stdout_dest = stdout_log
+                stderr_dest = stderr_log
+            else:
+                # Hériter des flux du processus parent (affichage dans le terminal)
+                stdout_dest = None
+                stderr_dest = None
+            
             proc = subprocess.Popen(
                 command,
                 shell=shell,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout_dest,
+                stderr=stderr_dest,
                 preexec_fn=os.setsid if hasattr(os, 'setsid') and not shell else None
             )
-            proc_name = name or (command[0] if isinstance(command, list) else str(command))
+            
             self.processes.append({
                 'process': proc,
                 'name': proc_name,
-                'command': command
+                'command': command,
+                'stdout_log': os.path.join(self.log_dir, f"{proc_name}_stdout.log") if log_to_file else None,
+                'stderr_log': os.path.join(self.log_dir, f"{proc_name}_stderr.log") if log_to_file else None
             })
-            logger.info(f"✅ Processus '{proc_name}' démarré (PID: {proc.pid})")
+            
+            if log_to_file:
+                logger.info(f"✅ Processus '{proc_name}' démarré (PID: {proc.pid})")
+                logger.info(f"   📄 Logs: {self.log_dir}/{proc_name}_*.log")
+            else:
+                logger.info(f"✅ Processus '{proc_name}' démarré (PID: {proc.pid}) [sortie console]")
+            
             return proc
         except Exception as e:
             logger.error(f"❌ Erreur démarrage processus: {e}")
@@ -190,3 +219,14 @@ class ProcessManager:
         
         self.processes.clear()
         logger.info("✅ Tous les processus arrêtés")
+    
+    def set_broadcast_socket(self, broadcast_socket):
+        """
+        Enregistre une référence au socket broadcast LIDAR.
+        Permet au ProcessManager de notifier le socket lors du démarrage du LIDAR.
+        
+        Args:
+            broadcast_socket: Instance de LidarDataBroadcastSocket
+        """
+        self.broadcast_socket = broadcast_socket
+        logger.info("📡 Socket broadcast LIDAR enregistré dans ProcessManager")

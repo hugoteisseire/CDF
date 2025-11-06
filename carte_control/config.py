@@ -17,6 +17,38 @@ STATE_WARNING = 1
 STATE_OK = 2
 
 # ================================
+# PROGRAMMES EXTERNES
+# ================================
+
+LIDAR_EXECUTABLE = '/home/raspi/Desktop/CDF/carte_control/simu_lidar/test_lidar_socket'
+
+# Programmes Python de stratégie (simulateur pour le moment)
+STRATEGY_EXECUTABLE = '/home/raspi/Desktop/CDF/carte_control/simu_strat/simu_strategy.py'
+
+# ================================
+# SOCKETS UNIX
+# ================================
+
+# Socket pour l'état du LIDAR (LIDAR → Python)
+LIDAR_STATE_SOCKET = '/tmp/robot.sock'
+
+# Socket broadcast pour les données LIDAR (Python → STRATEGY, PROG_1, PROG_2, etc.)
+LIDAR_DATA_SOCKET = '/tmp/lidar_data.sock'
+
+# Programmes sélectionnables via sw_sel (0-7)
+# Index correspond à la valeur de sw_sel (3 bits = 8 combinaisons)
+SELECTABLE_PROGRAMS = {
+    0: None,  # Aucun programme
+    1: {'type': 'python', 'path': '/home/raspi/Desktop/CDF/carte_control/simu_prog/simuprog_sel_1.py', 'name': 'PROG_1'},
+    2: {'type': 'python', 'path': '/home/raspi/Desktop/CDF/carte_control/simu_prog/simuprog_sel_2.py', 'name': 'PROG_2'},
+    3: {'type': 'python', 'path': '/home/raspi/Desktop/CDF/carte_control/simu_prog/simuprog_sel_3.py', 'name': 'PROG_3'},
+    4: {'type': 'python', 'path': '/home/raspi/Desktop/CDF/carte_control/simu_prog/simuprog_sel_4.py', 'name': 'PROG_4'},
+    5: None,
+    6: None,
+    7: None,
+}
+
+# ================================
 # HARDWARE AVAILABILITY
 # ================================
 

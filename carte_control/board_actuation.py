@@ -5,6 +5,7 @@ Thread d'actuation de la carte - Gestion des LED et monitoring I2C.
 import time
 import threading
 import logging
+from config import STATE_ERROR, STATE_WARNING, STATE_OK
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +13,26 @@ logger = logging.getLogger(__name__)
 class BoardActuationThread(threading.Thread):
     """Thread qui actualise les LED et monitore le bus I2C."""
     
-    def __init__(self, board, stop_event: threading.Event):
+
+    def update_lidar_state(self, lidar_socket):
+        
+        state = lidar_socket.get_state()
+
+        if state== 'init':
+            self.board.change_lidar_state(STATE_WARNING)
+        elif state== 'ready':
+            self.board.change_lidar_state(STATE_OK)
+        elif state== 'error':
+            self.board.change_lidar_state(STATE_ERROR)
+        elif state== 'lost':
+            self.board.change_lidar_state(STATE_WARNING)
+        
+
+    def __init__(self, board, stop_event: threading.Event, lidar_socket):
         super().__init__(daemon=True)
         self.board = board
         self.stop_event = stop_event
+        self.lidar_socket = lidar_socket
         self.actuation_interval_ms = 10  # Intervalle d'actualisation (ms)
         self.i2c_check_interval = 5  # Vérifier I2C tous les N cycles
         self.cycle_count = 0
@@ -40,6 +57,7 @@ class BoardActuationThread(threading.Thread):
             
             # Actuations normales
             try:
+                self.update_lidar_state(self.lidar_socket)
                 self.board.set_team_feedback()
                 self.board.set_state()
                 self.board.read_switch_selections()

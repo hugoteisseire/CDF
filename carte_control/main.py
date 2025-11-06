@@ -14,14 +14,16 @@ import sys
 import os
 
 # Imports locaux
-from carte_control.config import STATE_ERROR, STATE_OK, STATE_WARNING
-from config import HARDWARE_AVAILABLE, setup_logging
+from config import STATE_ERROR, STATE_OK, STATE_WARNING, LIDAR_EXECUTABLE
+from config import HARDWARE_AVAILABLE, setup_logging, LIDAR_STATE_SOCKET, LIDAR_DATA_SOCKET
 from control_board import ControlBoard
 from board_actuation import BoardActuationThread
 from input_poller import InputPoller
 from process_manager import ProcessManager
-from unix_socket_thread import UnixSocketServerThread, LidarSocket
+from unix_socket_thread import UnixSocketServerThread, LidarSocket, LidarDataBroadcastSocket
 from callbacks import (
+    set_process_manager,
+    set_board,
     on_tirette_falling,
     on_bp_rst_lidar_rising,
     on_bp_init_rising,
@@ -41,6 +43,9 @@ def restart_program():
 def main():
     """Point d'entrée principal."""
     logger.info("🤖 Démarrage carte de contrôle")
+
+
+
     
     # ================================
     # INITIALISATION
@@ -50,16 +55,43 @@ def main():
     stop_event = threading.Event()
     process_manager = ProcessManager()
     
+    # Injecter les dépendances dans les callbacks
+    set_process_manager(process_manager)
+    set_board(board)
+    
     # Init état équipe
     board.team = board.sw_team.value
     board.set_team_feedback()
+
+    # ======================================
+    # SOCKETS UNIX
+    # ======================================
+    
+    # Socket 2: Broadcast données LIDAR (Python → STRATEGY/PROG)
+    # Permet à plusieurs clients de lire les données LIDAR en parallèle
+    lidar_broadcast = LidarDataBroadcastSocket(LIDAR_DATA_SOCKET, stop_event)
+    lidar_broadcast.start()
+    logger.info(f"📡 Socket broadcast LIDAR démarré ({LIDAR_DATA_SOCKET})")
+    
+    # Socket 1: État du LIDAR (LIDAR → Python → Broadcast)
+    # Le LIDAR envoie ses données, Python les redistribue via broadcast
+    lidar_socket = LidarSocket(LIDAR_STATE_SOCKET, stop_event, broadcast_socket=lidar_broadcast)
+    lidar_socket.start()
+    logger.info(f"🎯 Socket LIDAR démarré ({LIDAR_STATE_SOCKET})")
+    
+    # Enregistrer le socket broadcast dans le ProcessManager
+    process_manager.set_broadcast_socket(lidar_broadcast)
+    
+    # Note: Le programme LIDAR sera démarré lors de l'appui sur BP_INIT
+    # (voir callback on_bp_init_rising)
     
     # ================================
     # DÉMARRAGE DES THREADS
     # ================================
     
+
     # Thread d'actuation (LED + monitoring I2C)
-    actuator = BoardActuationThread(board, stop_event)
+    actuator = BoardActuationThread(board, stop_event, lidar_socket)
     actuator.start()
 
     # Thread de polling des entrées
@@ -71,27 +103,7 @@ def main():
     poller.register_callback('sw_team', lambda n, v: on_sw_team_change(n, v, board))
     poller.start()
 
-    # ======================================
-    # EXEMPLE: Démarrage de programmes externes
-    # ======================================
-    
-    # Thread socket LIDAR (serveur Python, attend les clients)
-    lidar_socket = LidarSocket("/tmp/robot.sock", stop_event)
-    lidar_socket.start()
-    logger.info("🎯 Serveur socket LIDAR démarré")
-    
-    # Laisser le temps au socket d'être créé
-    time.sleep(0.5)
-    
-    # Programme LIDAR simulateur C (client, se connecte au socket Python)
-    lidar_executable = '/home/raspi/Desktop/CDF/carte_control/simu_lidar/test_lidar_socket'
-    lidar_proc = process_manager.start_c_program(lidar_executable, name='LIDAR_SIM')
-    
-    if not lidar_proc:
-        logger.warning("⚠️  Programme LIDAR non démarré (normal en développement)")
-    else:
-        logger.info("✅ Simulateur LIDAR démarré")
-    
+
     # Autres programmes (exemples commentés)
     # vision_proc = process_manager.start_python(
     #     '/home/pi/vision/detect.py',
@@ -115,6 +127,7 @@ def main():
         poller.join(timeout=2.0)
         actuator.join(timeout=2.0)
         lidar_socket.join(timeout=2.0)
+        lidar_broadcast.join(timeout=2.0)
         
         logger.info("🔴 Arrêt terminé")
     
@@ -125,27 +138,9 @@ def main():
     try:
         while True:
             # Affichage de l'état LIDAR
-            if lidar_socket.is_data_fresh():
-                state = lidar_socket.get_state()
-                
-                if state== 'init':
-                    board.change_lidar_state(STATE_WARNING)
-                elif state== 'running':
-                    board.change_lidar_state(STATE_OK)
-                elif state== 'error':
-                    board.change_lidar_state(STATE_ERROR)
-                elif state== 'lost':
-                    board.change_lidar_state(STATE_WARNING)
-                
-                print(f"\n{'='*50}")
-                print(f" État LIDAR: {state.upper()}")
-    
-                print(f"🔄  Switches: {board.get_switch_selections()}")
-
-            else:
-                print("⏳ En attente des données LIDAR...")
+            #print(f"🔄main :  Switches: {board.get_switch_selections()}")
             
-            time.sleep(1)
+            time.sleep(2)
             
             # Le check I2C est géré par BoardActuationThread
             # Si le bus est down, stop_event sera set automatiquement
