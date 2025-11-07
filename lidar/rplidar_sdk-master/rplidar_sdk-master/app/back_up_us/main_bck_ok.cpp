@@ -25,10 +25,6 @@
 #include "sl_lidar_driver.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <deque>   // ajouté pour historiser les positions
-#include <chrono>  
-#include "rpi_pwm.h"
-#include <stdint.h>
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -59,15 +55,9 @@ int server_sock = socket(AF_UNIX, SOCK_STREAM, 0);
 struct sockaddr_un addr;
 int client_sock = -1;
 
-int channel_pwm = 2;
-int frequency_pwm = 20000; // Hz
-RPI_PWM pwm_lidar;
-
-
 // Flag d'arrêt via Ctrl+C
 bool ctrl_c_pressed;
 void ctrlc(int) { ctrl_c_pressed = true; }
-using namespace std::chrono;
 
 using json = nlohmann::json;
 
@@ -112,32 +102,11 @@ void lireFichierJSON() {
     afficherTousLesChamps(json_data);
 }
 
-// helper : moyenne d'un deque<position>
-static position average_position(const std::deque<position>& dq) {
-    position sum;
-    sum.x = 0.0f; sum.y = 0.0f; sum.angle = 0.0f;
-    for (const auto &p : dq) {
-        sum.x += p.x;
-        sum.y += p.y;
-        sum.angle += p.angle;
-    }
-    if (dq.empty()) return sum;
-    float n = static_cast<float>(dq.size());
-    sum.x /= n;
-    sum.y /= n;
-    sum.angle /= n;
-    return sum;
-}
-
 // --- Boucle principale du robot ---
 void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& posImu, position& poslidar, int& client_sock, int& server_sock) {
     
     std::vector<float> scan(NUM_ANGLES, -1.0f);
     std::vector<TrackResult> trackedPoints;
-
-    // historique des dernières positions lidar (pour lissage)
-    std::deque<position> pos_history;
-    const size_t SMOOTH_N = 5; // nombre d'échantillons pour le lissage
 
     inittrackedpoints(trackedPoints, posrobot, 3);
     ImuPose p_init_imu = position_to_imu(posrobot);
@@ -150,11 +119,9 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
     std::cout << "Début boucle principale\n";
     std::cout << std::fixed << std::setprecision(5);
     ImuPose pose;
-    ImuPose speed;
+
     try_accept_client(client_sock, server_sock);
-    int count=0; // compteur de mesures consécutives avec au moins 3 piliers détectés
-    const int COUNT_THRESHOLD = 20;        // nombre d'itérations consécutives requises
-    const float SPEED_THRESHOLD = 0.02f;   // m/s, seuil pour considérer le robot "lent"
+
     while (!ctrl_c_pressed) {
         // Communication socket : envoi de la position IMU
         if (client_sock >= 0) {
@@ -176,15 +143,9 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
             std::cerr << "Erreur lecture pose\n";
         }
         posrobot = posImu;
-        auto t3 = high_resolution_clock::now();
+
         // Acquisition et traitement du scan LIDAR
         grabAndUpdateScan(scan, drv);
-        auto t4 = high_resolution_clock::now(); 
-        auto duration = duration_cast<milliseconds>(t4 - t3).count();
-        std::cout << "Durée acquisition et traitement du scan LIDAR: " << duration << " ms\n";
-        std::vector<position> points_in_table;
-        point_in_table2(scan, points_in_table, RESOLUTION, posrobot);
-        std::cout << "Nombre de points dans la table: " << points_in_table.size() << std::endl;
         trackPoints(scan, trackedPoints, RESOLUTION, posrobot);
 
         int pillardetected = 0;
@@ -208,43 +169,13 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
         }
 
         poslidar = computePose(trackedPoints.data());
-        // je veut lisser la pos sur les 5 dernieres positions
-        pos_history.push_back(poslidar);
-        if (pos_history.size() > SMOOTH_N) pos_history.pop_front();
 
-        // calculer la moyenne des dernières positions et l'utiliser comme poslidar lissée
-        position smoothed = average_position(pos_history);
-        poslidar = smoothed;
-
-        if (pillardetected >= 2) {
-            count++;
-            // si on a COUNT_THRESHOLD mesures consécutives avec >= 2 piliers détectés,
-            // on met à jour l'IMU (mais seulement si le robot est suffisamment lent)
-            if (count >= COUNT_THRESHOLD) {
-                // lire la vitesse (vérifier que la lecture réussit si la méthode retourne bool)
-                if (imu.readVelocity(speed)) { // adapter si readVelocity a une autre signature
-                    float speed_norm = std::hypot(speed.x, speed.y); // norme (m/s)
-                    std::cout << " => Vitesse IMU: vx=" << speed.x << " m/s, vy=" << speed.y
-                        << " m/s, norme=" << speed_norm << " m/s\n";
-                    if (speed_norm < SPEED_THRESHOLD) {
-                        // on met à jour la pose IMU avec la pose LIDAR lissée
-                        posrobot = poslidar;
-                        ImuPose p = position_to_imu(posrobot);
-                        imu.writePose(p);
-
-                    }
-                } else {
-                    std::cerr << "Warning: impossible de lire la vitesse IMU\n";
-                }
-                count = 0;
-            }
-        } else {
-            count = 0;
+        if (pillardetected >= 5) {
+            posrobot = poslidar;
+            ImuPose p = position_to_imu(posrobot);  
+            imu.writePose(p);     
         }
-        imu.readVelocity(speed);
-        float speed_norm = std::hypot(speed.x, speed.y); // norme (m/s)
-        std::cout << " => Vitesse IMU: vx=" << speed.x << " m/s, vy=" << speed.y
-                        << " m/s, norme=" << speed_norm << " m/s\n";
+
         std::cout << "\n=> Pose calculée: x=" << poslidar.x << " mm, y=" << poslidar.y
             << " mm, angle=" << poslidar.angle * 180.0f / M_PI << "°\n";
         std::cout << "=> Pose IMU: x=" << posImu.x << " mm, y=" << posImu.y
@@ -252,7 +183,6 @@ void mainLoop(ImuOTOS& imu, ILidarDriver* drv, position& posrobot, position& pos
         std::cout << "=> delta position: dx=" << (poslidar.x - posImu.x)
             << " mm, dy=" << (poslidar.y - posImu.y)
             << " mm, dangle=" << (poslidar.angle - posImu.angle) * 180.0f / M_PI << "°\n";
-
     }
 }
 
@@ -269,44 +199,16 @@ void cleanup(ILidarDriver* drv, int opt_channel_type) {
 }
 
 // --- Fonction principale refactorisée ---
-int main(int argc1, char *argv1[]) {
-    int team=0;
-    if (argc1 > 1) {
-        team = atoi(argv1[1]);  // Récupère 0, 1 ou 3
-        printf("Équipe: %d\n", team);
-    }
-    
-    // Initialisation des piliers selon l'équipe
-    initPillars(team);
-    
-    // Position initiale selon l'équipe
-    // Équipe 0: côté droit (x=2200), Équipe 1: côté gauche (x=800), Debug: centre (x=1500)
-    position p_init;
-    if (team == 3) {
-        p_init = position(750, 145, M_PI/2);  // Centre table pour debug
-        std::cout << "🐛 Mode DEBUG: position centrale\n";
-    } else if (team == 1) {
-        p_init = position(800, 1000, M_PI);  // Équipe 1 (gauche)
-    } else {
-        p_init = position(2200, 1000, 0);  // Équipe 0 (droite)
-    }
-    
+int main() {
+    lireFichierJSON() ;
     // Initialisation du socket serveur
     fcntl(server_sock, F_SETFL, O_NONBLOCK);
     init_socket(server_sock, client_sock, addr ,socket_path);
 
-    pwm_lidar.start(channel_pwm, frequency_pwm);
-    pwm_lidar.setDutyCycle(80);
-
-
     // Initialisation des positions
     position poslidar, posImu, posrobot;
+    position p_init(2200, 1000, 0);
     posrobot = p_init;
-    
- 
-    
-    std::cout << "Position initiale robot: x=" << p_init.x << " mm, y=" << p_init.y 
-              << " mm, angle=" << (p_init.angle * 180.0f / PI) << "°\n";
 
     // Initialisation IMU
     ImuOTOS imu("/dev/i2c-1", 0x17);
@@ -315,7 +217,7 @@ int main(int argc1, char *argv1[]) {
     // Initialisation des arguments LIDAR
     int argc = 5;
     const char *argv[] = {
-        "./ultra_simple", "--channel", "--serial", "/dev/serial0", "256000"
+        "./ultra_simple", "--channel", "--serial", "/dev/ttyUSB0", "256000"
     };
 
     // Initialisation du driver LIDAR

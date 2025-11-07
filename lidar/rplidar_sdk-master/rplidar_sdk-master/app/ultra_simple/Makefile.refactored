@@ -1,0 +1,76 @@
+# Makefile - Ajout pour version refactorée
+# À intégrer dans le Makefile existant
+
+# ============================================================================
+# CIBLES REFACTORÉES (ajouter après les cibles existantes)
+# ============================================================================
+
+# Variables pour la version refactorée
+REFACTORED_TARGET = ultra_simple_refactored
+REFACTORED_OBJS = main_refactored.o lidar_lib_refactored.o ImuOTOS.o
+
+# Règle principale pour la version refactorée
+$(REFACTORED_TARGET): $(REFACTORED_OBJS)
+	@echo "🔗 Linking $(REFACTORED_TARGET)..."
+	$(CXX) -o $@ $^ $(LDFLAGS)
+	@echo "✅ Build réussi: $(REFACTORED_TARGET)"
+
+# Compilation de main_refactored.cpp
+main_refactored.o: main_refactored.cpp robot_config.h lidar_lib_refactored.h ImuOTOS.h
+	@echo "🔨 Compilation main_refactored.cpp..."
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Compilation de lidar_lib_refactored.cpp
+lidar_lib_refactored.o: lidar_lib_refactored.cpp robot_config.h lidar_lib_refactored.h ImuOTOS.h
+	@echo "🔨 Compilation lidar_lib_refactored.cpp..."
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# ============================================================================
+# CIBLES ADDITIONNELLES
+# ============================================================================
+
+# Compile les deux versions
+.PHONY: all-versions
+all-versions: ultra_simple $(REFACTORED_TARGET)
+	@echo "✅ Versions originale et refactorée compilées"
+
+# Clean version refactorée
+.PHONY: clean-refactored
+clean-refactored:
+	@echo "🧹 Nettoyage version refactorée..."
+	rm -f $(REFACTORED_OBJS) $(REFACTORED_TARGET)
+
+# Clean total (originale + refactorée)
+.PHONY: clean-all
+clean-all: clean clean-refactored
+	@echo "🧹 Nettoyage complet effectué"
+
+# ============================================================================
+# NOTES D'INTÉGRATION
+# ============================================================================
+
+# 1. Copiez ces règles dans votre Makefile existant
+# 2. Vérifiez que CXXFLAGS et LDFLAGS sont correctement définis
+# 3. Assurez-vous que ImuOTOS.o est déjà compilé ou ajoutez sa règle
+#
+# Exemple CXXFLAGS minimal:
+# CXXFLAGS = -std=c++11 -I$(SDK_PATH)/include -I. -Wall -O2
+#
+# Exemple LDFLAGS minimal:
+# LDFLAGS = -L$(SDK_PATH)/lib -lsl_lidar_sdk -lpthread -lrt
+
+# ============================================================================
+# UTILISATION
+# ============================================================================
+
+# Compiler uniquement la version refactorée:
+#   make ultra_simple_refactored
+#
+# Compiler les deux versions:
+#   make all-versions
+#
+# Nettoyer uniquement la version refactorée:
+#   make clean-refactored
+#
+# Nettoyer tout:
+#   make clean-all

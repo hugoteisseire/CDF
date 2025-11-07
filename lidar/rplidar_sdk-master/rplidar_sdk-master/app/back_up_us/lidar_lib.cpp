@@ -279,7 +279,7 @@ void trackPoints(const std::vector<float>& scan,
         float dx = x - pillars[p].x;
         float dy = y - pillars[p].y;
         float error = sqrt(dx*dx + dy*dy);
-        if (error > 450) {
+        if (error > 350) {
             best.found = false;
         }
         trackedPoints[p] = best;
