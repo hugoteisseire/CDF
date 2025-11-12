@@ -58,7 +58,8 @@ def on_bp_init_rising(name: str, value: bool):
     
     # 1. Démarrer le LIDAR
     logger.info("📡 Démarrage du LIDAR...")
-    team_arg = "1" if _BOARD.get_team() else "0"
+    team_arg = "1" if _BOARD.get_team() else "0" 
+    team_arg = "3"  # Mode simulation quel que soit le switch équipe
     lidar_proc = _PM.start_c_program(LIDAR_EXECUTABLE, args=[team_arg], name='LIDAR_SIM')
     if lidar_proc:
         logger.info("✅ LIDAR démarré")

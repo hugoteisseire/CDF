@@ -163,9 +163,9 @@ while running:
     # Dessine tracked points (coord polaires depuis LIDARs)
     for tp in tracked:
         # On suppose angle du tracked point relatif à l'orientation LIDAR.
-        abs_angle = pos_lidar.angle + tp.angle
-        tx = pos_lidar.x + tp.distance * math.cos(abs_angle)
-        ty = pos_lidar.y + tp.distance * math.sin(abs_angle)
+        abs_angle = pos_imu.angle + tp.angle
+        tx = pos_imu.x + tp.distance * math.cos(abs_angle)
+        ty = pos_imu.y + tp.distance * math.sin(abs_angle)
         sx, sy = world_to_screen(tx, ty)
         color = COLOR_TRACKED_FOUND if tp.found else COLOR_TRACKED_MISSING
         pygame.draw.circle(screen, color, (sx, sy), R_TRACK)

@@ -39,6 +39,7 @@ class ControlBoard:
             return
             
         try:
+            
             i2c = busio.I2C(board.SCL, board.SDA)
             self.mcp1 = MCP23017(i2c, address=0x20)
             self.mcp2 = MCP23017(i2c, address=0x25)

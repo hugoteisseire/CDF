@@ -44,9 +44,6 @@ def main():
     """Point d'entrée principal."""
     logger.info("🤖 Démarrage carte de contrôle")
 
-
-
-    
     # ================================
     # INITIALISATION
     # ================================
@@ -134,7 +131,8 @@ def main():
     # ================================
     # BOUCLE PRINCIPALE
     # ================================
-    
+    time.sleep(2)  # Attente initiale avant la boucle
+    on_bp_init_rising(None, None)  # Démarrer LIDAR automatiquement
     try:
         while True:
             # Affichage de l'état LIDAR

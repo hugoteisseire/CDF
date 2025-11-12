@@ -20,7 +20,7 @@ STATE_OK = 2
 # PROGRAMMES EXTERNES
 # ================================
 
-LIDAR_EXECUTABLE = '/home/raspi/Desktop/CDF/carte_control/simu_lidar/test_lidar_socket'
+LIDAR_EXECUTABLE = '/home/raspi/Desktop/CDF/lidar/rplidar_sdk-master/rplidar_sdk-master/output/Linux/Release/ultra_simple'
 
 # Programmes Python de stratégie (simulateur pour le moment)
 STRATEGY_EXECUTABLE = '/home/raspi/Desktop/CDF/carte_control/simu_strat/simu_strategy.py'

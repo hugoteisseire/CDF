@@ -36,9 +36,9 @@ const std::vector<position> pillars_team1 = {
 };
 
 const std::vector<position> pillars_teamdebug = {
-    {0 , 457, 0},    // Pilier 1 
-    {1759, 859, 0},  // Pilier 2
-    {1769, 56, 0}     // Pilier 3
+    {200 , 1800, 0},    // Pilier 1 
+    {-30, 30, 0},  // Pilier 2
+    {3030, 1000, 0}     // Pilier 3
 };
 
 /**
@@ -238,52 +238,317 @@ void point_in_table2(const std::vector<float>& scan,
 }
 
 
-void trackPoints(const std::vector<float>& scan,
-                 std::vector<TrackResult>& trackedPoints,
-                 float resolution ,
-                position posrobot) // Traque tous les piliers
-{
-    float max_dist = 2000.0f;
-    int numAngles = scan.size();
-    for (size_t p = 0; p < trackedPoints.size(); ++p) {
-        float angle_ref = trackedPoints[p].angle; // radians
-        float dist_ref = trackedPoints[p].distance;
-        float bestScore = 1000000;
-        TrackResult best = {0, 0, false};
-        for (int i = 0; i < numAngles; i++) {
-            float d = scan[i];
-            if (d <= 0) continue;
-            float angle_deg = i * resolution; // indexation en degrés
-            float angle = angle_deg * PI / 180.0f; // conversion en radians
-            float da = fabs(angle - angle_ref);
-            da = fmin(da, 2 * PI - da);
-            float dd = fabs(d - dist_ref);
-            float normalized_da = da / (2 * PI);
-            float normalized_dd = dd / max_dist;
-            float score = normalized_da + normalized_dd;
-            if (score < bestScore) {
-                bestScore = score;
-                best = {angle, d, true};
+// ================== Détection du robot adverse via clustering ==================
+// Hypothèse: seul le robot adverse constitue une masse significative de points dans la table
+// (en dehors de petits bruits ou des piliers déjà suivis). On extrait donc le plus gros cluster
+// en distance euclidienne puis on en déduit sa position comme le centroïde.
+
+static constexpr float OPP_CLUSTER_RADIUS_MM      = 180.0f; // rayon max pour regrouper des points dans le même cluster
+static constexpr int   OPP_CLUSTER_MIN_POINTS     = 8;      // nombre minimal de points pour considérer un cluster valide
+static constexpr float OPP_PRIOR_SEARCH_RADIUS_MM = 600.0f; // rayon dans lequel on cherche d'abord autour de la position précédente
+static constexpr float OPP_SMOOTH_ALPHA           = 0.35f;  // lissage (optionnel) sur la mise à jour de la position
+
+struct OpponentDetection {
+    position centroid; // position estimée
+    int points = 0;    // nombre de points utilisés
+    bool found = false;
+};
+
+// Cluster naive O(n^2), suffisant pour quelques centaines de points. Si >10k points, prévoir grille.
+static OpponentDetection cluster_largest(const std::vector<position>& pts,
+                                         float clusterRadius,
+                                         int minPoints) {
+    const float r2 = clusterRadius * clusterRadius;
+    const int n = static_cast<int>(pts.size());
+    std::vector<char> visited(n, 0);
+    OpponentDetection best;
+    std::vector<int> queue;
+    queue.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        if (visited[i]) continue;
+        // BFS/expansion
+        queue.clear();
+        std::vector<int> cluster;
+        cluster.reserve(32);
+        queue.push_back(i);
+        visited[i] = 1;
+        for (size_t qi = 0; qi < queue.size(); ++qi) {
+            int idx = queue[qi];
+            cluster.push_back(idx);
+            const position &p = pts[idx];
+            for (int j = 0; j < n; ++j) {
+                if (visited[j]) continue;
+                float dx = pts[j].x - p.x;
+                float dy = pts[j].y - p.y;
+                if (dx*dx + dy*dy <= r2) {
+                    visited[j] = 1;
+                    queue.push_back(j);
+                }
             }
         }
-        //printf(best.found ? "\nPilier %zu trouvé à (angle: %.2f rad, distance: %.2f mm)\n" : "Pilier %zu non trouvé\n", p, best.angle, best.distance);
-        best.angle = findcenter(scan, best.angle, best.distance);
-
-        best.distance= scan[(int)(best.angle * 180.0f / PI / resolution)];
-        //printf(best.found ? "2/Pilier %zu trouvé à (angle: %.2f rad, distance: %.2f mm)\n" : "Pilier %zu non trouvé\n\n\n", p, best.angle, best.distance);
-
-        // Calculer la position du point suivi en coordonnées cartésiennes
-        float adjusted_angle_rad = best.angle + (posrobot.angle); // tout en radians
-        float x = posrobot.x + (best.distance + RAYON_PILIER) * cos(adjusted_angle_rad);
-        float y = posrobot.y + (best.distance + RAYON_PILIER) * sin(adjusted_angle_rad);
-        float dx = x - pillars[p].x;
-        float dy = y - pillars[p].y;
-        float error = sqrt(dx*dx + dy*dy);
-        if (error > 450) {
-            best.found = false;
+        if ((int)cluster.size() >= minPoints) {
+            // calcul centroïde
+            double sx = 0.0, sy = 0.0;
+            for (int id : cluster) { sx += pts[id].x; sy += pts[id].y; }
+            position c; c.x = (float)(sx / cluster.size()); c.y = (float)(sy / cluster.size()); c.angle = 0.0f;
+            if (cluster.size() > best.points) {
+                best.centroid = c;
+                best.points = (int)cluster.size();
+                best.found = true;
+            }
         }
-        trackedPoints[p] = best;
+    }
+    return best;
+}
 
+// 1) Détection simple du robot adverse (plus gros cluster) après extraction des points dans la table.
+bool detectOpponentRobot(const std::vector<position>& points_in_table,
+                         position &opponent_out) {
+    OpponentDetection det = cluster_largest(points_in_table,
+                                            OPP_CLUSTER_RADIUS_MM,
+                                            OPP_CLUSTER_MIN_POINTS);
+    if (!det.found) return false;
+    opponent_out = det.centroid;
+    return true;
+}
+
+// 2) Détection privilégiant la zone autour d'une position précédente connue. Si rien trouvé dans
+//    le voisinage prioritaire, on retombe sur la stratégie du plus gros cluster global.
+bool detectOpponentRobotWithPrior(const std::vector<position>& points_in_table,
+                                  const position& previous,
+                                  position &opponent_out) {
+    // Filtrer points proches du prior
+    const float searchR2 = OPP_PRIOR_SEARCH_RADIUS_MM * OPP_PRIOR_SEARCH_RADIUS_MM;
+    std::vector<position> local;
+    local.reserve(points_in_table.size());
+    for (const auto &p : points_in_table) {
+        float dx = p.x - previous.x;
+        float dy = p.y - previous.y;
+        if (dx*dx + dy*dy <= searchR2) local.push_back(p);
+    }
+
+    OpponentDetection det;
+    if (!local.empty()) {
+        det = cluster_largest(local, OPP_CLUSTER_RADIUS_MM, OPP_CLUSTER_MIN_POINTS);
+    }
+
+    if (!det.found) {
+        // fallback global
+        det = cluster_largest(points_in_table, OPP_CLUSTER_RADIUS_MM, OPP_CLUSTER_MIN_POINTS);
+        if (!det.found) return false;
+        // pas de lissage si on part de zéro
+        opponent_out = det.centroid;
+        return true;
+    }
+
+    // Lissage léger vers le nouveau centroïde
+    opponent_out.x = previous.x + OPP_SMOOTH_ALPHA * (det.centroid.x - previous.x);
+    opponent_out.y = previous.y + OPP_SMOOTH_ALPHA * (det.centroid.y - previous.y);
+    opponent_out.angle = 0.0f; // angle non pertinent ici
+    return true;
+}
+
+
+
+// ================== Paramètres de configuration du suivi des piliers ==================
+// Tous regroupés ici pour faciliter le réglage et éviter la "magie" de nombres en dur.
+// Ajustez selon le bruit du capteur, la précision de la pose robot et la taille réelle des piliers.
+static constexpr float TRACK_EXTRA_MARGIN_MM = 120.0f;          // marge ajoutée au rayon du pilier pour calcul de la largeur angulaire apparente
+static constexpr float TRACK_MIN_SPAN_DEG    = 3.0f;            // largeur angulaire minimale (en degrés) de la fenêtre de recherche
+static constexpr float TRACK_MAX_SPAN_DEG    = 50.0f;           // largeur angulaire maximale (en degrés) de la fenêtre de recherche
+static constexpr float TRACK_GATE_MIN_MM     = 180.0f;          // tolérance radiale minimale autour de la distance attendue
+static constexpr float TRACK_GATE_FRAC       = 0.25f;           // fraction de la distance attendue utilisée pour élargir la tolérance radiale
+static constexpr float TRACK_GATE_MAX_MM     = 500.0f;          // tolérance radiale maximale
+static constexpr float TRACK_VALIDATE_ERR_MM = 450.0f;          // erreur monde maxi (mm) pour accepter une détection nominale
+static constexpr float TRACK_VALIDATE_ERR_FALLBACK_MM = 550.0f; // erreur monde maxi (mm) pour accepter une détection en mode fallback
+static constexpr float TRACK_FALLBACK_EXTRA_SEARCH_DEG = 25.0f; // extension angulaire (de chaque côté) en mode fallback
+static constexpr float TRACK_DEG_PENALTY_MM  = 20.0f;           // pénalité (mm) par degré d'écart angulaire dans le score fallback
+static constexpr float TRACK_MIN_DISTANCE_MM = 50.0f;           // distance minimale (sécurité) pour éviter valeurs négatives
+static constexpr float TRACK_MAX_VALID_MM    = 8000.0f;         // distance maximale considérée comme plausible (filtre brut)
+
+// =======================================================================================
+
+void trackPoints(const std::vector<float>& scan,
+                 std::vector<TrackResult>& trackedPoints,
+                 float /*resolution*/ ,
+                 position posrobot) // Traque tous les piliers
+{
+    // On s'aligne sur l'indexation utilisée par grabAndUpdateScan (RESOLUTION/NUM_ANGLES)
+    const float resDeg = RESOLUTION;
+    const int numAngles = static_cast<int>(scan.size());
+    if (numAngles <= 0) return;
+
+    auto normAngle = [](float a) {
+        while (a < 0) a += 2.0f * PI;
+        while (a >= 2.0f * PI) a -= 2.0f * PI;
+        return a;
+    };
+
+    auto angleToIndex = [&](float angleRad) {
+        float angleDeg = angleRad * 180.0f / PI;
+        int idx = static_cast<int>(std::round(angleDeg / resDeg));
+        idx %= NUM_ANGLES;
+        if (idx < 0) idx += NUM_ANGLES;
+        return idx;
+    };
+
+    auto indexToAngle = [&](int idx){
+        idx = (idx % NUM_ANGLES + NUM_ANGLES) % NUM_ANGLES;
+        return (idx * resDeg) * PI / 180.0f;
+    };
+
+    auto median3 = [&](float a, float b, float c){
+        // médiane sans std::swap pour limiter les includes
+        if ((a <= b && b <= c) || (c <= b && b <= a)) return b;
+        if ((b <= a && a <= c) || (c <= a && a <= b)) return a;
+        return c;
+    };
+
+    for (size_t p = 0; p < trackedPoints.size(); ++p) {
+        // -------------------- 1. Prédiction à partir de la carte et de la pose robot --------------------
+        float dx = pillars[p].x - posrobot.x;
+        float dy = pillars[p].y - posrobot.y;
+        float pred_dist = std::sqrt(dx * dx + dy * dy) - RAYON_PILIER; // distance au bord du cylindre
+        if (pred_dist < TRACK_MIN_DISTANCE_MM) pred_dist = TRACK_MIN_DISTANCE_MM; // évite 0/valeurs négatives
+        float pred_angle = normAngle(std::atan2(dy, dx) - posrobot.angle); // angle dans le repère LIDAR
+
+        // -------------------- 2. Point de référence (historique vs prédiction) --------------------
+        // Si le pilier était déjà trouvé précédemment on exploite sa dernière position (suivi temporel implicite).
+        float angle_ref = trackedPoints[p].found ? trackedPoints[p].angle : pred_angle; // rad
+        float dist_ref  = (trackedPoints[p].found && trackedPoints[p].distance > 0) ? trackedPoints[p].distance : pred_dist; // mm
+
+        // -------------------- 3. Construction de la fenêtre angulaire --------------------
+        // Largeur apparente ~ 2*atan((rayon+ marge)/distance). On borne pour éviter une fenêtre trop étroite ou énorme.
+        float spanRad = 2.0f * std::atan2(RAYON_PILIER + TRACK_EXTRA_MARGIN_MM, std::max(100.0f, dist_ref));
+        float minSpan = TRACK_MIN_SPAN_DEG * (PI / 180.0f);
+        float maxSpan = TRACK_MAX_SPAN_DEG * (PI / 180.0f);
+        if (spanRad < minSpan) spanRad = minSpan;
+        if (spanRad > maxSpan) spanRad = maxSpan;
+        int halfWin = std::max(2, static_cast<int>(std::ceil((spanRad * 180.0f / PI) / resDeg)));
+
+        int idx_center = angleToIndex(angle_ref);
+
+        // -------------------- 4. Gating radial (tolérance sur la distance) --------------------
+        // Combine une composante fixe (bruit, calibration) et une composante proportionnelle à la distance (divergence angulaire).
+        float gate_mm = std::max(TRACK_GATE_MIN_MM, TRACK_GATE_FRAC * dist_ref);
+        gate_mm = std::min(gate_mm, TRACK_GATE_MAX_MM);
+
+        // -------------------- 5. Recherche d'un "run" cohérent --------------------
+        // On parcourt les échantillons dans la fenêtre angulaire et détecte des segments contigus (runs)
+        // de points dont la distance est dans la tolérance gate. Pour chaque run on prend le point
+        // le plus proche (flanc du cylindre), puis on retient globalement le meilleur run.
+        int bestIdx = -1;
+        float bestRunMin = 1e9f;
+        int runStart = -1;
+        int runLen = 0;
+
+        auto inGate = [&](float d){ return (d > 0.0f && d < TRACK_MAX_VALID_MM && std::fabs(d - dist_ref) <= gate_mm); };
+
+        for (int di = -halfWin; di <= halfWin; ++di) {
+            int idx = (idx_center + di + NUM_ANGLES) % NUM_ANGLES;
+            float d = scan[idx];
+            bool ok = inGate(d);
+            if (ok) {
+                if (runStart < 0) { runStart = idx; runLen = 1; }
+                else { runLen++; }
+            } else {
+                if (runStart >= 0 && runLen > 0) {
+                    // On prend l'indice du minimum dans ce run
+                    int minIdx = runStart;
+                    float minVal = 1e9f;
+                    for (int k = 0; k < runLen; ++k) {
+                        int j = (runStart + k) % NUM_ANGLES;
+                        float v = scan[j];
+                        if (inGate(v) && v < minVal) { minVal = v; minIdx = j; }
+                    }
+                    if (minVal < bestRunMin) { bestRunMin = minVal; bestIdx = minIdx; }
+                    runStart = -1; runLen = 0;
+                }
+            }
+        }
+        // Flush dernier run si la fenêtre se termine sur un run
+        if (runStart >= 0 && runLen > 0) {
+            int minIdx = runStart;
+            float minVal = 1e9f;
+            for (int k = 0; k < runLen; ++k) {
+                int j = (runStart + k) % NUM_ANGLES;
+                float v = scan[j];
+                if (inGate(v) && v < minVal) { minVal = v; minIdx = j; }
+            }
+            if (minVal < bestRunMin) { bestRunMin = minVal; bestIdx = minIdx; }
+        }
+
+        TrackResult best = {0.0f, 0.0f, false};
+
+        if (bestIdx >= 0) {
+            // Raffinement local: médiane 3 points puis recentrage via findcenter
+            float vL = scan[(bestIdx - 1 + NUM_ANGLES) % NUM_ANGLES];
+            float vC = scan[bestIdx];
+            float vR = scan[(bestIdx + 1) % NUM_ANGLES];
+            float vMed = median3(vL, vC, vR);
+
+            float coarse_angle = indexToAngle(bestIdx);
+            float refined_angle = findcenter(scan, coarse_angle, dist_ref);
+
+            // Si findcenter échoue, on garde l'angle brut
+            if (!(refined_angle >= 0.0f)) refined_angle = coarse_angle;
+
+            int refined_idx = angleToIndex(refined_angle);
+            float dsel = scan[refined_idx];
+            if (dsel <= 0.0f) dsel = (vMed > 0.0f ? vMed : vC);
+
+            best.angle = refined_angle;
+            best.distance = dsel;
+            best.found = true;
+
+            // Validation dans le repère monde par rapport à la position connue du pilier
+            float adjusted_angle_rad = best.angle + posrobot.angle; // rad
+            float x = posrobot.x + (best.distance + RAYON_PILIER) * std::cos(adjusted_angle_rad);
+            float y = posrobot.y + (best.distance + RAYON_PILIER) * std::sin(adjusted_angle_rad);
+            float ex = x - pillars[p].x;
+            float ey = y - pillars[p].y;
+            float err = std::sqrt(ex * ex + ey * ey);
+            if (err > TRACK_VALIDATE_ERR_MM) {
+                best.found = false; // rejet outlier
+            }
+        } else {
+            // Fallback: élargir la recherche angulaire, score simple distance + pénalité angulaire
+            int extraWin = std::max(halfWin, static_cast<int>(std::ceil(TRACK_FALLBACK_EXTRA_SEARCH_DEG / resDeg)));
+            float bestScore = 1e9f;
+            int candIdx = -1;
+            for (int di = -extraWin; di <= extraWin; ++di) {
+                int idx = (idx_center + di + NUM_ANGLES) % NUM_ANGLES;
+                float d = scan[idx];
+                if (d <= 0.0f || d > TRACK_MAX_VALID_MM) continue;
+                float ang = indexToAngle(idx);
+                float da = std::fabs(ang - angle_ref);
+                da = std::fmin(da, 2.0f * PI - da);
+                float dd = std::fabs(d - dist_ref);
+                // Pèse plus fort la distance, pénalise l'écart angulaire
+                float score = dd + (da * 180.0f / PI) * TRACK_DEG_PENALTY_MM; // pénalité mm par degré
+                if (score < bestScore) { bestScore = score; candIdx = idx; }
+            }
+            if (candIdx >= 0) {
+                float coarse_angle = indexToAngle(candIdx);
+                float refined_angle = findcenter(scan, coarse_angle, dist_ref);
+                if (!(refined_angle >= 0.0f)) refined_angle = coarse_angle;
+                int refined_idx = angleToIndex(refined_angle);
+                float dsel = scan[refined_idx];
+                if (dsel <= 0.0f) dsel = scan[candIdx];
+                best = { refined_angle, dsel, true };
+
+                // Validation monde
+                float adjusted_angle_rad = best.angle + posrobot.angle;
+                float x = posrobot.x + (best.distance + RAYON_PILIER) * std::cos(adjusted_angle_rad);
+                float y = posrobot.y + (best.distance + RAYON_PILIER) * std::sin(adjusted_angle_rad);
+                float ex = x - pillars[p].x;
+                float ey = y - pillars[p].y;
+                float err = std::sqrt(ex * ex + ey * ey);
+                if (err > TRACK_VALIDATE_ERR_FALLBACK_MM) best.found = false; // seuil plus tolérant en fallback
+            }
+        }
+
+        trackedPoints[p] = best;
     }
 }
 
@@ -306,86 +571,90 @@ void inittrackedpoints(std::vector<TrackResult>& trackedPoints, position pos, in
 // deja trouver a angle et distance, adapter le span de recherche en fonction
 // de la distance et filtrer les point trop eloignés de distance
 float findcenter(const std::vector<float>& scan, float angle, float distance) {
-    
-    if (distance <= 0.0f) return -1; // Évite les erreurs si distance est nulle ou négative
+    // Objectif: trouver l'angle vers le CENTRE du pilier. Pour un cylindre, l'angle du point le plus proche
+    // (sur le flanc face au lidar) est colinéaire avec le centre du pilier. On cherche donc le minimum local
+    // de distance dans une petite fenêtre autour de l'angle attendu, puis on affine par interpolation parabolique.
 
-    float angle_rad = angle; // conversion en radians
-    float angle_deg = angle * 180.0f / PI; // conversion en degrés
-    float angle_span = atan2(150.0f, distance) * 180.0f / PI; // angle de recherche en degrés (rayon 100 mm)
-    int start_index = static_cast<int>(std::round((angle_deg - angle_span) / RESOLUTION));
-    int end_index = static_cast<int>(std::round((angle_deg + angle_span) / RESOLUTION));
+    if (distance <= 0.0f) return -1.0f; // invalide
 
-    // Gestion des limites
-    start_index = std::max(0, start_index);
-    end_index = std::min(NUM_ANGLES - 1, end_index);
+    // 1) Fenêtre angulaire adaptative autour de l'angle fourni
+    const float resDeg = RESOLUTION;
+    const float angleDeg = angle * 180.0f / PI;
+    const int centerIdx = static_cast<int>(std::round(angleDeg / resDeg));
 
-    int best_index = -1;
-    float best_distance = 100000.0f; // distance max au centre du pilier
+    // largeur apparente ≈ 2*atan((rayon + marge)/distance)
+    float spanRad = 2.0f * std::atan2(RAYON_PILIER + TRACK_EXTRA_MARGIN_MM, std::max(100.0f, distance));
+    float minSpan = TRACK_MIN_SPAN_DEG * (PI / 180.0f);
+    float maxSpan = TRACK_MAX_SPAN_DEG * (PI / 180.0f);
+    if (spanRad < minSpan) spanRad = minSpan;
+    if (spanRad > maxSpan) spanRad = maxSpan;
+    int halfWin = std::max(2, static_cast<int>(std::ceil((spanRad * 180.0f / PI) / resDeg)));
 
-    for (int i = start_index; i <= end_index; ++i) {
-        int index_mod = (i % NUM_ANGLES + NUM_ANGLES) % NUM_ANGLES; // Gestion du "wrap-around"
-        float d = scan[index_mod];
-        // Filtrer les points trop éloignés
-        float dd= fabs(d - distance);
-        if (dd > 190.0f) continue; // Ignore les points à plus
-        if (d > 0 && d < best_distance) {
-            best_distance = d;
-            best_index = index_mod; // Retourne l'indice modifié, pas i
+    // 2) Gating radial (tolérance) et recherche du minimum local dans la fenêtre (avec wrap-around)
+    float gate_mm = std::max(TRACK_GATE_MIN_MM, TRACK_GATE_FRAC * distance);
+    gate_mm = std::min(gate_mm, TRACK_GATE_MAX_MM);
+
+    int bestIdx = -1;
+    float bestDist = 1e9f;
+
+    auto inGate = [&](float d){ return (d > 0.0f && d < TRACK_MAX_VALID_MM && std::fabs(d - distance) <= gate_mm); };
+
+    for (int di = -halfWin; di <= halfWin; ++di) {
+        int idx = (centerIdx + di) % NUM_ANGLES;
+        if (idx < 0) idx += NUM_ANGLES;
+        float d = scan[idx];
+        if (!inGate(d)) continue;
+        if (d < bestDist) { bestDist = d; bestIdx = idx; }
+    }
+
+    // Fallback: si aucun point ne passe le gate, on cherche le mini brut dans la fenêtre
+    if (bestIdx < 0) {
+        for (int di = -halfWin; di <= halfWin; ++di) {
+            int idx = (centerIdx + di) % NUM_ANGLES;
+            if (idx < 0) idx += NUM_ANGLES;
+            float d = scan[idx];
+            if (d <= 0.0f || d > TRACK_MAX_VALID_MM) continue;
+            if (d < bestDist) { bestDist = d; bestIdx = idx; }
         }
     }
-    angle = best_index * RESOLUTION; // conversion en degrés
-    angle_rad= angle * PI / 180.0f; // conversion en radians
 
-    return angle_rad; // retourne l'angle en radians
+    if (bestIdx < 0) return -1.0f; // rien de pertinent trouvé
+
+    // 3) Affinage sub-indice par interpolation parabolique (quadratic fit) autour du minimum discret
+    int i0 = bestIdx;
+    int iL = (i0 - 1 + NUM_ANGLES) % NUM_ANGLES;
+    int iR = (i0 + 1) % NUM_ANGLES;
+    float yL = scan[iL];
+    float y0 = scan[i0];
+    float yR = scan[iR];
+
+    // Parabolic vertex offset (en indices): delta = 0.5*(yL - yR) / (yL - 2*y0 + yR)
+    float denom = (yL - 2.0f * y0 + yR);
+    float delta = 0.0f;
+    if (std::fabs(denom) > 1e-6f) {
+        delta = 0.5f * (yL - yR) / denom;
+        // On borne l'offset à [-1,1] pour éviter les extrapolations absurdes
+        if (delta < -1.0f) delta = -1.0f;
+        if (delta >  1.0f) delta =  1.0f;
+    }
+
+    // 4) Conversion de l'indice affinée vers l'angle (radians)
+    float refinedIdx = i0 + delta;
+    float refinedDeg = refinedIdx * resDeg;
+    float angle_rad  = refinedDeg * PI / 180.0f;
+    // Normalisation [0, 2pi)
+    while (angle_rad < 0.0f) angle_rad += 2.0f * PI;
+    while (angle_rad >= 2.0f * PI) angle_rad -= 2.0f * PI;
+
+    return angle_rad;
 }
 
 
-
-void try_accept_client(int& client_sock, int server_sock) {
-    if (client_sock < 0) {
-        client_sock = accept(server_sock, NULL, NULL);
-        if (client_sock < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK)
-                perror("accept");
-        } else {
-            printf("Client Python connecté.\n");
-        }
-    }
-}
-
-
-
-void init_socket(int& server_sock, int& client_sock, struct sockaddr_un& addr, const char *socket_path)
-{
-    // Supprimer l'ancien fichier s'il existe
-    unlink(socket_path);
-
-    if (server_sock < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-
-    // Configurer l'adresse
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
-
-    // Associer le socket au fichier
-    if (bind(server_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind");
-        close(server_sock);
-        exit(EXIT_FAILURE);
-    }
-
-    // Mettre en écoute
-    if (listen(server_sock, 1) < 0) {
-        perror("listen");
-        close(server_sock);
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Serveur en attente de connexion sur %s...\n", socket_path);
-}
+// ============================================================================
+// FONCTIONS SOCKET SERVEUR SUPPRIMÉES
+// On utilise maintenant le mode CLIENT (connexion dans main.cpp)
+// Les anciennes fonctions try_accept_client() et init_socket() ne sont plus nécessaires
+// ============================================================================
 
 
 void print_usage(int argc, const char * argv[])
@@ -432,7 +701,7 @@ bool grabAndUpdateScan(std::vector<float>& scan, sl::ILidarDriver* drv) {
     sl_result op_result = drv->grabScanDataHq(nodes, count);
     auto t4 = high_resolution_clock::now();
     auto duration = duration_cast<milliseconds>(t4 - t3).count();
-    std::cout << "Durée acquisition scan: " << duration << " ms\n";
+    //std::cout << "Durée acquisition scan: " << duration << " ms\n";
     if (SL_IS_OK(op_result)) {
         for (size_t pos = 0; pos < count; ++pos) {
             // Conversion angle Q14 -> degrés

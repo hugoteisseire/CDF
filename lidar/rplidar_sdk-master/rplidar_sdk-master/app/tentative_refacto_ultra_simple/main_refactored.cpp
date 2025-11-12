@@ -455,7 +455,7 @@ int main(int argc, char* argv[]) {
     // 8. Nettoyage
     std::cout << "🧹 Nettoyage...\n";
     drv->stop();
-    delay(200);
+    //delay(200);
     if (channelType == CHANNEL_TYPE_SERIALPORT) {
         drv->setMotorSpeed(0);
     }

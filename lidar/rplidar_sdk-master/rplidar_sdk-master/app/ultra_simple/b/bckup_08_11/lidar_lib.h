@@ -1,16 +1,3 @@
-#pragma once
-#include <vector>
-
-// Déclarations pour la détection du robot adverse (clustering)
-struct position; // forward if not already defined
-
-bool detectOpponentRobot(const std::vector<position>& points_in_table,
-                         position &opponent_out);
-
-bool detectOpponentRobotWithPrior(const std::vector<position>& points_in_table,
-                                  const position& previous,
-                                  position &opponent_out);
-
 #ifndef LIDAR_LIB_H
 #define LIDAR_LIB_H
 #include "ImuOTOS.h"
@@ -37,7 +24,7 @@ struct TrackResult {
 };
 
 
-constexpr int RAYON_PILIER = 35;             
+constexpr int RAYON_PILIER = 16;             
 constexpr float RESOLUTION = 0.25f;
 constexpr int NUM_ANGLES = static_cast<int>(360.0f / RESOLUTION);
 extern std::vector<position> pillars;
@@ -73,7 +60,8 @@ void point_in_table(const std::vector<float>& scan,std::vector<position>& points
 // deja trouver a angle et distance, adapter le span de recherche en fonction
 // de la distance et filtrer les point trop eloignés de distance
 float findcenter(const std::vector<float>& scan, float angle, float distance) ;
-// Fonctions socket serveur supprimées - on utilise mode CLIENT maintenant
+void try_accept_client(int& client_sock, int server_sock)   ;
+void init_socket(int& server_sock, int& client_sock, struct sockaddr_un& addr, const char *socket_path);
 bool checkSLAMTECLIDARHealth(sl::ILidarDriver * drv);
 void print_usage(int argc, const char * argv[]);
 bool grabAndUpdateScan(std::vector<float>& scan, sl::ILidarDriver* drv);

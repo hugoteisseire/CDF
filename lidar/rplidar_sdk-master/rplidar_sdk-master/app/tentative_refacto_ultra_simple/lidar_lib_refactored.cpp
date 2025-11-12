@@ -13,6 +13,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <errno.h>
+#include "sl_lidar.h" 
+#include "sl_lidar_driver.h"
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
