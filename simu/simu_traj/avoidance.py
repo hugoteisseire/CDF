@@ -15,22 +15,34 @@ LOCAL_WINDOW_SIZE_MM = 1000  # carré de 1000 mm autour du robot
 TABLE_WIDTH_MM = 3000
 TABLE_HEIGHT_MM = 2000
 
-CELL_SIZE = 40  # mm
+CELL_SIZE = 20  # mm (doublé la résolution: 40mm -> 20mm)
 GRID_WIDTH = TABLE_WIDTH_MM // CELL_SIZE
 GRID_HEIGHT = TABLE_HEIGHT_MM // CELL_SIZE
 
 # Obstacles fixes (zones rectangulaires)
+# Système: (0,0) en bas à gauche, y+ vers le haut
+# IMPORTANT: pygame.Rect stocke (x, y_bottom, width, height) où y_bottom est la coordonnée du BAS de l'obstacle
 import pygame
-obstacles_rect = [
-    pygame.Rect(650, 0, 400, 200),#x,y
-    pygame.Rect(1050, 0, 900, 450),
-    pygame.Rect(1950, 0, 400, 200),
-    pygame.Rect(0, 900, 450, 450),
-    pygame.Rect(0, 1850, 450, 150),
-    pygame.Rect(2000, 1850, 450, 150),
-    pygame.Rect(1550, 1550, 450, 450)
-  
 
+def create_obstacle(x_left, y_bottom, width, height):
+    """
+    Crée un obstacle avec des coordonnées cohérentes.
+    x_left: position X du bord gauche (mm)
+    y_bottom: position Y du bord BAS (mm) - système (0,0) en bas à gauche
+    width, height: dimensions (mm)
+    
+    Note: pygame.Rect stocke les coordonnées mais on les interprète comme bottom-up
+    """
+    return pygame.Rect(x_left, y_bottom, width, height)
+
+obstacles_rect = [
+    create_obstacle(650, 1800, 400, 200),    # Haut à gauche
+    create_obstacle(1050, 1550, 900, 450),   # Haut au centre
+    create_obstacle(1950, 1800, 400, 200),   # Haut à droite
+    create_obstacle(0, 650, 450, 450),       # Milieu à gauche
+    create_obstacle(0, 0, 450, 150),         # Bas à gauche
+    create_obstacle(2000, 0, 450, 150),      # Bas à droite
+    create_obstacle(1550, 0, 450, 450)       # Bas au centre
 ]
 
 def normalize(v):
@@ -126,6 +138,15 @@ def clamp_position(pos, radius, width, height):
     pos[0] = max(radius, min(width - radius, pos[0]))
     pos[1] = max(radius, min(height - radius, pos[1]))
     return pos
+
+def is_position_in_obstacle(pos, radius, obstacles_rect):
+    """Vérifie si une position (avec rayon) intersecte un obstacle."""
+    for rect in obstacles_rect:
+        # Créer un rectangle élargi pour tenir compte du rayon
+        inflated_rect = rect.inflate(2 * radius, 2 * radius)
+        if inflated_rect.collidepoint(pos[0], pos[1]):
+            return True
+    return False
 
 def pos_to_cell(pos):
     return int(pos[0] // CELL_SIZE), int(pos[1] // CELL_SIZE)
@@ -236,12 +257,17 @@ def compute_direction_astar(robot, target, obstacles_rect, table_width, table_he
     else:
         code = 2  # Cible libre
 
-    # Construire la grille d'occupation avec ou sans l'ennemi
-    #include_enemy = (code != 1)
-    
-
     start_cell = pos_to_cell(robot.pos)
     goal_cell = pos_to_cell(target)
+
+    # Si le robot est dans une cellule occupée (deadzone), trouver la cellule libre la plus proche
+    if grid[start_cell[0]][start_cell[1]] == 1:
+        start_cell = find_closest_free_cell_around(robot.pos, grid, robot.radius)
+        # Si on est bloqué, essayer de s'échapper directement
+        if grid[start_cell[0]][start_cell[1]] == 1:
+            # Direction pour s'éloigner de l'ennemi ou de l'obstacle le plus proche
+            escape_direction = get_escape_direction(robot.pos, enemy_pos, obstacles_rect)
+            return escape_direction, [], 1, grid
 
     # Si la cible est sur l'ennemi, on vise une cellule libre autour
     if code == 1:
@@ -275,6 +301,37 @@ def find_closest_free_cell_around(target_pos, grid, radius_mm):
                     if grid[nx][ny] == 0:
                         return (nx, ny)
     return (cx, cy)  # fallback (très rare)
+
+def get_escape_direction(robot_pos, enemy_pos, obstacles_rect):
+    """Calcule une direction pour échapper des deadzones."""
+    # Direction pour s'éloigner de l'ennemi
+    to_enemy = robot_pos - enemy_pos
+    dist_enemy = np.linalg.norm(to_enemy)
+    
+    escape_dir = np.array([0.0, 0.0])
+    
+    # Fuir l'ennemi
+    if dist_enemy > 0:
+        escape_dir += normalize(to_enemy) * 2.0
+    
+    # Fuir les obstacles proches
+    for rect in obstacles_rect:
+        closest_x = max(rect.left, min(robot_pos[0], rect.right))
+        closest_y = max(rect.top, min(robot_pos[1], rect.bottom))
+        closest_point = np.array([closest_x, closest_y])
+        to_obstacle = robot_pos - closest_point
+        dist = np.linalg.norm(to_obstacle)
+        
+        if dist < 300 and dist > 0:  # Si proche d'un obstacle
+            escape_dir += normalize(to_obstacle) * (1.0 / (dist + 1))
+    
+    # Normaliser la direction d'échappement
+    if np.linalg.norm(escape_dir) > 0:
+        return normalize(escape_dir)
+    else:
+        # Direction aléatoire si aucune direction claire
+        angle = np.random.uniform(0, 2 * np.pi)
+        return np.array([np.cos(angle), np.sin(angle)])
 
 def check_target_validity(target, robot_radius_mm, enemy_pos, obstacles_rect):
     """Vérifie dans quel cas se trouve la cible"""

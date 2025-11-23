@@ -1,39 +1,54 @@
 import can
 import time
 from mks_servo_can import MksServo
-from mks_servo_can.mks_enums import WorkMode, CalibrationResult, Direction
-from mks_servo_can.mks_enums import CalibrationResult, RunMotorResult
-from lib_moteur import read_motor_speed,read_motor_position,move_relative,reset_zero,stop_pos_soft,move_velocity,stop_velocity_soft
-#servo.set_work_mode(WorkMode.SrvFoc)
+from mks_servo_can.mks_enums import WorkMode, CalibrationResult, Direction, RunMotorResult
 
-# Initialise l'interface CAN
-bus = can.interface.Bus(interface="socketcan", channel="can0", bitrate=500000)
+
+from lib_moteur import (
+    read_motor_speed, read_motor_position, move_relative, reset_zero,
+    stop_pos_soft, move_velocity, stop_velocity_soft, calibrate
+)
+
+# CAN bus setup
+bus = can.interface.Bus(interface="socketcan", channel="can0", bitrate=1000000)
 notifier = can.Notifier(bus, [])
 bus.socket.setblocking(False)
-# Crée les objets moteur
+
+# Servo motor objects
 servo1 = MksServo(bus, notifier, 1)
 servo2 = MksServo(bus, notifier, 2)
 servo3 = MksServo(bus, notifier, 3)
-print(servo1.set_subdivisions(16))
-print(servo3.set_subdivisions(16))
-print(servo2.set_subdivisions(16))
-time.sleep(1)
-print(servo1.b_calibrate_encoder())
-time.sleep(1)
-print(servo3.b_calibrate_encoder())
-time.sleep(1)
-print(servo2.b_calibrate_encoder())
-time.sleep(10)
-
-#reset_zero(bus, can_id=0x01)
-
-#time.sleep(100.005)
-
-#aller_vers_position_async(servo3, 504000, vitesse_rpm=300, acceleration=10)
-
 reset_zero(bus, can_id=0x02)
 reset_zero(bus, can_id=0x01)
 reset_zero(bus, can_id=0x03)
+time.sleep(2)
+# --- Optional: Initial configuration and calibration (set to False by default) ---
+if True:
+    print(servo1.set_subdivisions(16))
+    print(servo3.set_subdivisions(16))
+    print(servo2.set_subdivisions(16))
+    servo1.set_work_mode(WorkMode.SrvFoc)
+    servo2.set_work_mode(WorkMode.SrvFoc)
+    servo3.set_work_mode(WorkMode.SrvFoc)
+    time.sleep(1)
+    calibrate(bus=bus, can_id=0x03)
+    calibrate(bus=bus, can_id=0x01)
+    calibrate(bus=bus, can_id=0x02)
+    time.sleep(10)
+    reset_zero(bus, can_id=0x02)
+    reset_zero(bus, can_id=0x01)
+    reset_zero(bus, can_id=0x03)
+    time.sleep(2)     
+    move_relative(bus, can_id=0x01, direction=0, speed=1000, acceleration=250, pulses=100)
+    move_relative(bus, can_id=0x02, direction=0, speed=1000, acceleration=250, pulses=100)
+    move_relative(bus, can_id=0x03, direction=0, speed=1000, acceleration=250, pulses=100)
+    time.sleep(0.2)     
+    move_relative(bus, can_id=0x01, direction=1, speed=1000, acceleration=250, pulses=100)
+    move_relative(bus, can_id=0x02, direction=1, speed=1000, acceleration=250, pulses=100)
+    move_relative(bus, can_id=0x03, direction=1, speed=1000, acceleration=250, pulses=100)
+    time.sleep(2)     
+
+
 frequency_hz = 0.1  # fréquence de l'onde sinusoïdale
 amplitude = 1500    # amplitude max de la vitesse
 offset = 1500       # vitesse de base (pour rester toujours positive)
@@ -41,9 +56,18 @@ acceleration = 10   # acceleration constante
 speed=100
 #move_relative(bus, can_id=0x03, direction=0, speed=1000, acceleration=80, pulses=1000000)
 #move_relative(bus, can_id=0x02, direction=0, speed=1000, acceleration=80, pulses=1000000)
+# 1 =gauche 0=droite
+Sens= 1
 while True:
-    move_relative(bus, can_id=0x01, direction=0, speed=1000, acceleration=200, pulses=200*16)
-    time.sleep(0.5)
+    print("cmd en cours, sens =",Sens)
+    move_relative(bus, can_id=0x01, direction=Sens, speed=1000, acceleration=200, pulses=200*16)
+    move_relative(bus, can_id=0x02, direction=Sens, speed=1000, acceleration=200, pulses=200*16)
+    move_relative(bus, can_id=0x03, direction=Sens, speed=1000, acceleration=200, pulses=200*16)
+    time.sleep(5)
+    if Sens==1:
+        Sens=0
+    else:
+        Sens=1
 
 #stop_pos_soft(bus, can_id=1,acceleration=50)
 #stop_pos_soft(bus, can_id=2,acceleration=100)

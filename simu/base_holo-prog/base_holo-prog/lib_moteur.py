@@ -118,6 +118,7 @@ def move_relative(bus, can_id, direction, speed, acceleration, pulses):
     # Envoi
     try:
         bus.send(msg)
+        bus.send(msg)
         print(f"Message envoyé : {msg}")
     except can.CanError as e:
         print(f"Erreur lors de l'envoi du message CAN: {e}")
