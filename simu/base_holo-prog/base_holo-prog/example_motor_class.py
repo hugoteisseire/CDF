@@ -10,7 +10,7 @@ import numpy as np
 from motor_controller import Motor, MotorGroup
 from mks_servo_can.mks_enums import WorkMode, CalibrationResult, Direction, RunMotorResult
 from mks_servo_can import MksServo
-from holo_base import Robot, compute_wheel_speeds_global
+from holo_base import Robot, compute_wheel_speeds_global,compute_wheel_distances_global
 
 # =============================
 #   CONFIGURATION CAN
@@ -32,10 +32,29 @@ servo3 = MksServo(bus, notifier, 3)
 
 # Création des instances Motor (UN SEUL objet par moteur)
 # Le mode async peut être activé/désactivé à la volée
-motor1 = Motor(bus, can_id=1, mks_servo=servo1, enable_async_control=False)
-motor2 = Motor(bus, can_id=2, mks_servo=servo2, enable_async_control=False)
-motor3 = Motor(bus, can_id=3, mks_servo=servo3, enable_async_control=False)
+motor1 = Motor(
+    bus=bus, can_id=1, mks_servo=servo1,
+    wheel_diameter_mm=54.3,
+    steps_per_revolution=200,
+    subdivisions=16,
+    gear_ratio=48.0/15.0
+)
 
+motor2 = Motor(
+    bus=bus, can_id=2, mks_servo=servo2,
+    wheel_diameter_mm=54.3,
+    steps_per_revolution=200,
+    subdivisions=16,
+    gear_ratio=48.0/15.0
+)
+
+motor3 = Motor(
+    bus=bus, can_id=3, mks_servo=servo3,
+    wheel_diameter_mm=54.3,
+    steps_per_revolution=200,
+    subdivisions=16,
+    gear_ratio=48.0/15.0
+)
 # Groupe de moteurs pour contrôle synchronisé
 motors = MotorGroup([motor1, motor2, motor3])
 
@@ -94,9 +113,9 @@ def example_synchronized_movement():
     ]
     
     # Paramètres
-    max_speed = 80  # RPM
-    pulses_per_step = 10000
-    base_accel = 800  # pulses/s²
+    max_speed =700  # RPM
+    pulses_per_step = 30000
+    base_accel = 100  # pulses/s²
     while True:
         for i, direction in enumerate(directions):
             print(f"\n📍 Étape {i+1}/4 - Direction: {direction}")
@@ -229,7 +248,7 @@ def example_async_speed_changes():
     print("✅ Mode asynchrone désactivé")
 
 def example_async_square():
-       
+    print("\n=== Exemple Async 2 : Trajectoire carrée en mode asynchrone ===")
     # Activer le mode asynchrone sur les moteurs existants
     motor1.start_async_control()
     motor2.start_async_control()
@@ -247,14 +266,16 @@ def example_async_square():
     np.array([0, -1.0]),  # gauche
     np.array([1.0, 0])    # bas
     ]
-    vmax=200
+    vmax=100
     running = True
     try:
         step_duration = 3  # Durée de chaque segment (secondes)
         direction_index = 0
         t_start = time.time()
+        sens=1.0
         # --- Exemple : trajectoire carrée (inatteignable à cause du 'continue' ci-dessus) ---
         while running:
+            
             now = time.time()
             if now - t_start > step_duration:
                 # Passage à la direction suivante
@@ -262,13 +283,35 @@ def example_async_square():
                 t_start = now
                 print("etape_suivante")
                 direction = directions[direction_index]
-                raw_speeds = compute_wheel_speeds_global(robot, direction[0], direction[1], 0.0)
+                sens=sens*(-1.0)
+                print(sens)
+                raw_speeds = compute_wheel_speeds_global(robot, 0.0, 0.0,sens)
+               
                 motors.set_velocities(raw_speeds, max_speed=vmax)
             time.sleep(0.05)
     except Exception as e:
         print(f"Erreur dans la boucle principale : {e}")
     finally:
         pass
+
+# exemple distance movement
+def example_move_distance():
+    
+    directions = [
+    np.array([0, -1.0,3000]),    # droite
+    np.array([-1.0, 0,3000]),   # haut
+    np.array([0, -1.0,3000]),  # gauche
+    np.array([1.0, 0,3000])    # bas
+    ]
+    for direction in directions:
+        distances=compute_wheel_distances_global(robot, direction[0]*direction[2], direction[1]*direction[2])
+        print(f"distances to move: {distances}")
+        motors.move_synchronized_distance(distances_mm=distances,base_acceleration=100, speed_rpm=200)  
+        motors.wait_all_stopped()
+        time.sleep(10)
+
+
+
 # =============================
 #   PROGRAMME PRINCIPAL
 # =============================
@@ -310,15 +353,18 @@ if __name__ == "__main__":
         
         # --- Exemples mode synchrone ---
         # example_simple_movement()
-        #example_synchronized_movement()
+        example_synchronized_movement()
         # example_velocity_control()
         # example_read_state()
         # example_acceleration_conversion()
+        # example_move_distance()           # NOUVEAU: Déplacement par distance en mm
+        # example_conversion_utilities()    # NOUVEAU: Utilitaires de conversion
         
         # --- Exemples mode asynchrone ---
-        example_async_square()
+        #example_async_square()
         # example_async_direction_changes()
         # example_async_square_trajectory()
+        #example_move_distance()
         
     except KeyboardInterrupt:
         print("\n🛑 Interruption par l'utilisateur")
@@ -331,6 +377,7 @@ if __name__ == "__main__":
     finally:
         # Arrêt sécurisé de tous les moteurs
         print("\n🛑 Arrêt de tous les moteurs...")
-        motors.stop_all(acceleration=150)
+    
+        motors.stop_all(acceleration=255)
         time.sleep(0.5)
         print("✅ Arrêt complet")

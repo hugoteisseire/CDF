@@ -1,7 +1,8 @@
 # =============================
 #      IMPORTS & CONSTANTS
 # =============================
-
+# sudo ip link set can0 up type can bitrate 1000000
+# sudo ifconfig can0 txqueuelen 1000
 import time
 import threading
 import can
@@ -340,7 +341,7 @@ try:
                 print("etape_suivante")
                 direction = directions[direction_index]
                 raw_speeds = compute_wheel_speeds_global(robot, direction[0], direction[1], 0.0)
-                set_wheel_speeds2(robot, raw_speeds, base_acceleration=150, speed_multiplier=150)
+                set_wheel_speeds2(robot, raw_speeds, base_acceleration=150, speed_multiplier=10)
             time.sleep(0.05)
             clear_can_buffer(bus)
     except Exception as e:

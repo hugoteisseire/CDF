@@ -42,7 +42,11 @@ class Motor:
     TICKS_PER_REVOLUTION = 3200  # 16 subdivisions × 200 pas/tour
     
     def __init__(self, bus: can.Bus, can_id: int, mks_servo: Optional[MksServo] = None, 
-                 enable_async_control: bool = False):
+                 enable_async_control: bool = False,
+                 wheel_diameter_mm: float = 58.0,
+                 steps_per_revolution: int = 200,
+                 subdivisions: int = 16,
+                 gear_ratio: float = 15.0/48.0):
         """
         Initialise un moteur.
         
@@ -51,11 +55,24 @@ class Motor:
             can_id: ID CAN du moteur (1, 2, 3, etc.)
             mks_servo: Instance MksServo optionnelle (pour fonctions avancées)
             enable_async_control: Active le thread daemon pour contrôle asynchrone
+            wheel_diameter_mm: Diamètre de la roue en mm (par défaut 60mm)
+            steps_per_revolution: Nombre de pas par tour moteur (par défaut 200)
+            subdivisions: Nombre de subdivisions (par défaut 16)
+            gear_ratio: Rapport de réduction (par défaut 1.0, >1 si réducteur)
         """
         self.bus = bus
         self.can_id = can_id
         self.servo = mks_servo
         self.state = MotorState()
+        
+        # Paramètres mécaniques pour conversions distance/pulses
+        self.wheel_diameter_mm = wheel_diameter_mm
+        self.steps_per_revolution = steps_per_revolution
+        self.subdivisions = subdivisions
+        self.gear_ratio = gear_ratio
+        
+        # Calcul des constantes de conversion
+        self._update_conversion_constants()
         
         # Thread de contrôle asynchrone
         self._stop_event = threading.Event()
@@ -228,7 +245,152 @@ class Motor:
         return pulses_per_s2
     
     # =============================
+    #   CONVERSION DISTANCE/PULSES
+    # =============================
+    
+    def _update_conversion_constants(self) -> None:
+        """
+        Met à jour les constantes de conversion distance/pulses.
+        À appeler après modification des paramètres mécaniques.
+        """
+        import math
+        
+        # Périmètre de la roue en mm
+        self.wheel_perimeter_mm = math.pi * self.wheel_diameter_mm
+        
+        # Nombre de pulses par tour de roue (en tenant compte du rapport de réduction)
+        self.pulses_per_wheel_revolution = (
+            self.steps_per_revolution * self.subdivisions * self.gear_ratio
+        )
+        
+        # Conversion mm -> pulses
+        self.pulses_per_mm = self.pulses_per_wheel_revolution / self.wheel_perimeter_mm
+        
+        # Conversion pulses -> mm
+        self.mm_per_pulse = self.wheel_perimeter_mm / self.pulses_per_wheel_revolution
+    
+    def distance_to_pulses(self, distance_mm: float) -> int:
+        """
+        Convertit une distance linéaire en nombre de pulses.
+        
+        Args:
+            distance_mm: Distance en millimètres
+            
+        Returns:
+            Nombre de pulses correspondant
+        """
+        return int(distance_mm * self.pulses_per_mm)
+    
+    def pulses_to_distance(self, pulses: int) -> float:
+        """
+        Convertit un nombre de pulses en distance linéaire.
+        
+        Args:
+            pulses: Nombre de pulses
+            
+        Returns:
+            Distance en millimètres
+        """
+        return pulses * self.mm_per_pulse
+    
+    def speed_mm_s_to_rpm(self, speed_mm_s: float) -> int:
+        """
+        Convertit une vitesse linéaire (mm/s) en vitesse de rotation (RPM).
+        
+        Args:
+            speed_mm_s: Vitesse linéaire en mm/s
+            
+        Returns:
+            Vitesse en RPM
+        """
+        # Tours/seconde = (mm/s) / (mm/tour)
+        revolutions_per_s = speed_mm_s / self.wheel_perimeter_mm
+        
+        # RPM = tours/s * 60 * rapport_réduction
+        rpm = abs(revolutions_per_s) * 60 * self.gear_ratio
+        
+        return int(min(rpm, 3000))  # Limité à 3000 RPM max
+    
+    def rpm_to_speed_mm_s(self, rpm: int) -> float:
+        """
+        Convertit une vitesse de rotation (RPM) en vitesse linéaire (mm/s).
+        
+        Args:
+            rpm: Vitesse en RPM
+            
+        Returns:
+            Vitesse linéaire en mm/s
+        """
+        # Tours/seconde = RPM / 60 / rapport_réduction
+        revolutions_per_s = rpm / 60 / self.gear_ratio
+        
+        # mm/s = tours/s * mm/tour
+        speed_mm_s = revolutions_per_s * self.wheel_perimeter_mm
+        
+        return speed_mm_s
+    
+    # =============================
     #   MOUVEMENTS POSITIONNELS
+    # =============================
+    
+    def move_distance(
+        self,
+        distance_mm: float,
+        speed_mm_s: Optional[float] = None,
+        speed_rpm: Optional[int] = None,
+        acceleration: int = 100,
+        direction: Optional[int] = None
+    ) -> None:
+        """
+        Déplace la roue d'une distance linéaire précise.
+        
+        Cette méthode convertit automatiquement la distance en pulses en tenant
+        compte du diamètre de roue, du rapport de réduction et des subdivisions.
+        
+        Args:
+            distance_mm: Distance à parcourir en millimètres (peut être négative)
+            speed_mm_s: Vitesse linéaire en mm/s (prioritaire sur speed_rpm)
+            speed_rpm: Vitesse en RPM (utilisée si speed_mm_s n'est pas fourni)
+            acceleration: Accélération MKS (0-255) ou en pulses/s² si > 255
+            direction: 0=CCW, 1=CW. Si None, déduit du signe de distance_mm
+        
+        Raises:
+            ValueError: Si aucune vitesse n'est spécifiée ou si les valeurs sont invalides
+            
+        Example:
+            >>> # Avancer de 100mm à 50mm/s
+            >>> motor.move_distance(distance_mm=100, speed_mm_s=50)
+            
+            >>> # Reculer de 50mm à 100 RPM
+            >>> motor.move_distance(distance_mm=-50, speed_rpm=100)
+        """
+        # Détermination de la vitesse
+        if speed_mm_s is not None:
+            rpm = self.speed_mm_s_to_rpm(speed_mm_s)
+        elif speed_rpm is not None:
+            rpm = speed_rpm
+        else:
+            raise ValueError("Vous devez spécifier soit speed_mm_s soit speed_rpm")
+        
+        # Conversion distance -> pulses
+        pulses = self.distance_to_pulses(distance_mm)
+        
+        # Gestion de la direction
+        if direction is None:
+            direction = 1 if distance_mm < 0 else 0
+        
+        # Appel de la méthode move_relative existante
+        self.move_relative(
+            pulses=abs(pulses),
+            speed=rpm,
+            acceleration=acceleration,
+            direction=direction
+        )
+        
+        print(f"🎯 Déplacement: {distance_mm:.1f}mm ({pulses} pulses) à {rpm} RPM")
+    
+    # =============================
+    #   MOUVEMENTS POSITIONNELS (PULSES)
     # =============================
     
     def move_relative(
@@ -253,8 +415,8 @@ class Motor:
             pulses = abs(pulses)
         
         # Conversion accélération si nécessaire
-        if acceleration > 255:
-            acceleration = self.linear_to_acc(acceleration)
+        #if acceleration > 255:
+        acceleration = self.linear_to_acc(acceleration)
         
         # Validation
         if not (0 <= speed <= 3000):
@@ -290,6 +452,37 @@ class Motor:
         except can.CanError as e:
             raise RuntimeError(f"CAN error during move_relative: {e}")
     
+    def stop_relative(self) -> None:
+        """
+        Arrête un mouvement relatif en cours.
+        Envoie une commande move_relative avec vitesse=0 et pulses=0.
+        """
+        code = 0xFD
+        speed = 0
+        acceleration = 255  # Arrêt rapide
+        pulses = 0
+        direction = 0
+        
+        # Construction du message (même format que move_relative)
+        speed_high = ((direction & 0x01) << 7) | ((speed >> 8) & 0x0F)
+        speed_low = speed & 0xFF
+        pulse_bytes = [(pulses >> shift) & 0xFF for shift in (16, 8, 0)]
+        
+        data = [code, speed_high, speed_low, acceleration] + pulse_bytes
+        crc = (int(self.can_id) + int(sum(data))) & 0xFF
+        data.append(crc)
+        
+        msg = can.Message(
+            arbitration_id=self.can_id,
+            data=data,
+            is_extended_id=False
+        )
+        msg.dlc = 8
+        
+        try:
+            self.bus.send(msg)
+        except can.CanError as e:
+            raise RuntimeError(f"CAN error during stop_relative: {e}")
     # =============================
     #   MOUVEMENTS EN VITESSE
     # =============================
@@ -641,11 +834,82 @@ class MotorGroup:
                 acceleration=accel_pulses_s2,
                 direction=direction
             )
-    
-    def stop_all(self, acceleration: int = 150) -> None:
+
+    def move_synchronized_distance(
+        self,
+        distances_mm: list[float],
+        speed_rpm: float,
+        base_acceleration: float
+    ) -> None:
+        
+        """
+        Déplace tous les moteurs de manière synchronisée sur des distances données.
+        
+        Les vitesses et accélérations sont proportionnelles pour que
+        tous les moteurs atteignent leur Vmax et s'arrêtent en même temps.
+        
+        Args:
+            distances_mm: Liste des distances à parcourir en mm
+            speed_rpm: Vitesse maximale en RPM
+            base_acceleration: Accélération de base en pulses/s²
+        """
+        # Conversion des distances en pulses
+        pulses_list = [
+            motor.distance_to_pulses(dist_mm) for motor, dist_mm in zip(self.motors, distances_mm)
+        ]
+        
+        max_pulses = max(abs(pulses) for pulses in pulses_list)
+        if max_pulses == 0:
+            return
+        
+        for i, (motor, pulses) in enumerate(zip(self.motors, pulses_list)):
+            # Calcul du ratio de distance
+            speed_ratio = abs(pulses) / max_pulses
+            
+            # Vitesse proportionnelle
+            motor_speed = int(speed_ratio * speed_rpm)
+            
+            # Accélération proportionnelle pour synchronisation
+            accel_pulses_s2 = speed_ratio * base_acceleration
+            
+            # Direction
+            direction = 1 if pulses < 0 else 0
+            
+            # Envoi de la commande
+            motor.move_relative(
+                pulses=abs(pulses),
+                speed=motor_speed,
+                acceleration=accel_pulses_s2,
+                direction=direction
+            )
+
+
+
+
+
+    def stop_all(self, acceleration: int = 255) -> None:
         """Arrête tous les moteurs."""
         for motor in self.motors:
-            motor.stop(acceleration=acceleration)
+            motor.stop_relative()
+            motor.start_async_control() # Assure que le contrôle asynchrone est actif   
+        velocities = [0 for _ in self.motors]
+        self.set_velocities(velocities, max_speed=0)
+        for motor in self.motors:
+            motor.servo.emergency_stop_motor()
+        return
+       
+        for motor in self.motors:
+            motor.stop_async_control()
+            motor.servo.emergency_stop_motor()
+            motor.move_velocity(speed=0, acceleration=255)
+            motor.move_relative(
+                pulses=abs(1),
+                speed=100,
+                acceleration=800,
+                direction=1
+            )
+
+            
     
     def wait_all_stopped(self, timeout: float = 30.0) -> bool:
         """

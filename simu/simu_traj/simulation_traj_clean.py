@@ -36,7 +36,9 @@ from avoidance import (
     cell_to_pos,
     CELL_SIZE,
     normalize,
-    is_position_in_obstacle
+    is_position_in_obstacle,
+    compute_navigation_direction,
+    reset_pathfinding_state
 )
 
 
@@ -161,17 +163,18 @@ class PathState:
         Returns:
             tuple: (pause_robot, robot_moving, error_message, should_recompute)
         """
+        # SÉCURITÉ DÉSACTIVÉE: Cible peut être dans obstacle
         if code == Config.PATH_CODE_OBSTACLE:
-            return True, False, "Cible dans un obstacle", True
+            return False, True, "Cible dans un obstacle (tentative d'approche)", True
         
-        elif code == Config.PATH_CODE_ENEMY:
+        if code == Config.PATH_CODE_ENEMY:
             return False, True, None, True
         
         elif code == Config.PATH_CODE_CLEAR:
             return False, True, None, False
         
         elif code == Config.PATH_CODE_UNREACHABLE:
-            return True, False, "Cible inaccessible (bloqué)", True
+            return False, True, "Cible inaccessible (tentative d'approche)", True
         
         else:
             return True, False, "Erreur inconnue", False
@@ -480,11 +483,8 @@ class SimulationState:
         self.robot_moving = False
         self.pause_robot = False
         
-        # Pathfinding
-        self.path_computed = False
+        # Pathfinding (simplifié - géré par compute_navigation_direction)
         self.path_astar = []
-        self.current_path_index = 1
-        self.recompute_counter = 0
         self.grid = None
         self.code = Config.PATH_CODE_CLEAR
         self.error_message = None
@@ -521,28 +521,51 @@ class Simulator:
     def run(self):
         """Boucle principale."""
         while self.state.running:
-            self._handle_events()
-            self._handle_mouse()
+
+            # ===== PORTAGE ROBOT RÉEL =====
+            
+            # 1. SIMULATION: Clavier/souris → ROBOT RÉEL: Boutons physiques/stratégie préprogrammée
+            self._handle_events()  # → Remplacer par gestion boutons (démarrage match, arrêt urgence)
+            self._handle_mouse()   # → Supprimer (pas de souris sur robot)
             
             # Mesure le temps des algorithmes
             start_algo = time.perf_counter()
-            self._update_enemy()
-            self._update_pathfinding()
-            self._update_robot()
+            
+            # 2. LOCALISATION: SIMULATION: Position parfaite → ROBOT RÉEL: Odométrie + IMU + LiDAR
+            #    AVANT _update_pathfinding(), ajouter:
+            #    - robot.pos, robot.angle = localization.update(wheel_speeds, dt)
+            #    - Fusion IMU (angle) + odométrie roues (position)
+            
+            # 3. PERCEPTION: SIMULATION: Ennemi fictif → ROBOT RÉEL: Détection LiDAR + clustering
+            self._update_enemy()  # → Remplacer par: enemy_pos = lidar_handler.detect_enemy(robot.pos, robot.angle)
+                                  #    + obstacles_dynamic = lidar_handler.get_obstacles_mm(...)
+            
+            # 4. PATHFINDING: ✅ GARDER TEL QUEL (core algorithme)
+            self._update_pathfinding()  # ✅ Conserver ! Recalcule A* avec obstacles réels
+                                        #    Modifier: passer obstacles_dynamic au lieu de obstacles_rect fixes
+            
+            # 5. CONTRÔLE: SIMULATION: Calcul position → ROBOT RÉEL: Commandes moteurs CAN
+            self._update_robot()  # → Diviser en 2 parties:
+                                  #    GARDER: Calcul direction + vitesses roues (cinématique)
+                                  #    REMPLACER: robot.pos += velocity PAR motor_controller.set_wheel_speeds(speeds)
+                                  #    SUPPRIMER: Simulation physique (position calculée par odométrie à l'étape 2)
+
             algo_time = time.perf_counter() - start_algo
             
-            # Mesure le temps d'affichage
+            # 6. AFFICHAGE: SIMULATION: Pygame → ROBOT RÉEL: Optionnel (debug sur écran embarqué)
             render_time = 0.0
             if Config.DISPLAY_ENABLED:
                 start_render = time.perf_counter()
-                self.renderer.render_all(self.state)
-                pygame.display.flip()
+                self.renderer.render_all(self.state)  # → Optionnel: garder pour debug sur Raspberry Pi
+                pygame.display.flip()                 # → Optionnel: écran HDMI embarqué
                 render_time = time.perf_counter() - start_render
             
+            # 7. DEBUG: ✅ GARDER (utile pour tuning)
             if Config.DEBUG_PERF:
-                self._print_debug(algo_time, render_time)
+                self._print_debug(algo_time, render_time)  # → Optionnel: logger vers fichier ou console
             
-            self.clock.tick(Config.TICKS_PER_SECOND)
+            # 8. TIMING: ✅ GARDER ABSOLUMENT (boucle 60 Hz critique)
+            self.clock.tick(Config.TICKS_PER_SECOND)  # ✅ ESSENTIEL ! Maintient 60 fps (16.67ms/loop)
         
         pygame.quit()
         sys.exit()
@@ -604,36 +627,28 @@ class Simulator:
         )
     
     def _update_pathfinding(self):
-        """Mise à jour du pathfinding."""
-        # Calcul périodique
-        if not self.state.path_computed:
-            direction, path, code, grid = compute_direction_astar(
-                self.state.robot,
-                self.state.target_pos,
-                obstacles_rect,
-                Config.TABLE_WIDTH_MM,
-                Config.TABLE_HEIGHT_MM,
-                self.state.enemy_pos
-            )
-            self.state.path_astar = path
-            self.state.code = code
-            self.state.grid = grid
-            self.state.path_computed = True
-            self.state.recompute_counter = 0
-            self.state.current_path_index = 1
-        else:
-            self.state.recompute_counter += 1
-            if self.state.recompute_counter > Config.PATH_RECOMPUTE_INTERVAL:
-                self.state.path_computed = False
+        """Mise à jour du pathfinding avec la nouvelle fonction compute_navigation_direction."""
+        # Appel de la fonction autonome de navigation
+        nav_result = compute_navigation_direction(
+            robot=self.state.robot,
+            target_pos=self.state.target_pos,
+            enemy_pos=self.state.enemy_pos,
+            table_width_mm=Config.TABLE_WIDTH_MM,
+            table_height_mm=Config.TABLE_HEIGHT_MM,
+            path_recompute_interval=Config.PATH_RECOMPUTE_INTERVAL,
+            force_recompute=False
+        )
         
-        # Gestion de l'état
-        pause, moving, error, recompute = PathState.handle_code(self.state.code)
-        self.state.pause_robot = pause
-        self.state.robot_moving = moving
-        self.state.error_message = error
+        # Mise à jour de l'état de la simulation avec les résultats
+        self.state.path_astar = nav_result['path']
+        self.state.code = nav_result['code']
+        self.state.grid = nav_result['grid']
+        self.state.pause_robot = nav_result['should_pause']
+        self.state.error_message = nav_result['error_message']
         
-        if recompute:
-            self.state.path_computed = False
+        # Si la cible est atteinte, arrêter le mouvement
+        if nav_result['reached']:
+            self.state.robot_moving = False
     
     def _update_robot(self):
         """Mise à jour du robot."""
@@ -690,15 +705,21 @@ class Simulator:
             self.state.error_message = "Trop proche de l'adversaire"
             return
         
-        # Direction
-        direction, index, reached = Navigation.update_path_following(
-            self.state.robot,
-            self.state.path_astar,
-            self.state.current_path_index
+        # Direction (calculée par compute_navigation_direction)
+        # On récupère la direction directement depuis le pathfinding
+        nav_result = compute_navigation_direction(
+            robot=self.state.robot,
+            target_pos=self.state.target_pos,
+            enemy_pos=self.state.enemy_pos,
+            table_width_mm=Config.TABLE_WIDTH_MM,
+            table_height_mm=Config.TABLE_HEIGHT_MM,
+            path_recompute_interval=Config.PATH_RECOMPUTE_INTERVAL,
+            force_recompute=False
         )
-        self.state.current_path_index = index
         
-        if reached:
+        direction = nav_result['direction']
+        
+        if nav_result['reached']:
             self.state.robot_moving = False
             return
         
@@ -723,17 +744,24 @@ class Simulator:
             # Moyenne des 5 dernières valeurs
             self.state.robot.wheel_speeds[i] = np.mean(self.state.robot.wheel_speeds_history[i])
         
-        # Position
+        # ===== SIMULATION PHYSIQUE (À SUPPRIMER SUR ROBOT RÉEL) =====
+        # Sur robot réel: position vient de l'odométrie (étape 2 de run())
+        # Ces lignes simulent ce que feraient les moteurs physiques
+        
+        # Calcul vitesse base à partir des vitesses roues (odométrie inverse)
         self.state.robot.base_velocity = compute_base_velocity(
             self.state.robot,
             self.state.robot.wheel_speeds
         )
+        # Rotation vitesse locale → globale
         self.state.robot.base_velocity_global = rotate_vector(
             self.state.robot.base_velocity,
             self.state.robot.angle
         )
-        self.state.robot.pos += self.state.robot.base_velocity_global
-        self.state.robot.angle += compute_rotation_velocity(
+        # Intégration position (SIMULATION SEULEMENT)
+        self.state.robot.pos += self.state.robot.base_velocity_global  # ← SUPPRIMER sur robot réel
+        # Intégration angle (SIMULATION SEULEMENT)
+        self.state.robot.angle += compute_rotation_velocity(           # ← SUPPRIMER sur robot réel
             self.state.robot,
             self.state.robot.wheel_speeds
         )
@@ -742,7 +770,149 @@ class Simulator:
         dist = np.linalg.norm(self.state.robot.pos - self.state.target_pos)
         if dist < Config.TARGET_RADIUS_MM + self.state.robot.radius:
             self.state.target_pos = Utils.random_position()
+            reset_pathfinding_state()  # Réinitialiser l'état du pathfinding
+    
+    def _update_robot_real(self):
+        """
+        Mise à jour du robot - VERSION ROBOT RÉEL.
+        Cette fonction calcule les commandes moteurs et les envoie au contrôleur CAN.
+        """
+        # ===== 1. ARRÊT DU ROBOT =====
+        if not self.state.robot_moving:
+            # Arrêter toutes les roues
+            self.state.robot.wheel_speeds = [0.0, 0.0, 0.0]
+            self.state.robot.base_velocity = np.array([0.0, 0.0])
+            self.state.robot.base_velocity_global = np.array([0.0, 0.0])
+            
+            # TODO: INTERFAÇAGE MOTEURS - Arrêt d'urgence
+            # motor_controller.emergency_stop()
+            # OU motor_controller.set_wheel_speeds([0, 0, 0])
+            
+            # Réinitialiser l'historique de lissage
+            if hasattr(self.state.robot, 'wheel_speeds_history'):
+                self.state.robot.wheel_speeds_history = [[], [], []]
+            self.state.stuck_counter = 0
+            return
+        
+        # ===== 2. DÉTECTION DE BLOCAGE =====
+        # Vérifier si le robot bouge vraiment (détection deadzone)
+        movement = np.linalg.norm(self.state.robot.pos - self.state.last_position)
+        if movement < 1.0 and self.state.robot_moving:  # Moins de 1mm de mouvement
+            self.state.stuck_counter += 1
+        else:
+            self.state.stuck_counter = 0
+        self.state.last_position = self.state.robot.pos.copy()
+        
+        # Si bloqué trop longtemps (0.5s = 30 frames @ 60fps)
+        if self.state.stuck_counter > 30:
+            # TODO: INTERFAÇAGE RECALAGE - Déblocage automatique
+            # Option 1: Mouvement arrière puis rotation
+            # motor_controller.backward(distance_mm=100, duration_ms=500)
+            # motor_controller.rotate(angle_deg=random.randint(-45, 45))
+            
+            # Option 2: Recalage position avec balises/LiDAR
+            # robot.pos = localization.recalibrate_position()
+            
+            # Pour l'instant: marquer comme nécessitant recalcul
+            self.state.stuck_counter = 0
             self.state.path_computed = False
+            self.state.error_message = "Déblocage automatique"
+            
+            # TODO: INTERFAÇAGE MOTEURS - Arrêt temporaire
+            # motor_controller.set_wheel_speeds([0, 0, 0])
+            return
+        
+        # ===== 3. SÉCURITÉ DISTANCE ADVERSAIRE =====
+        dist_to_enemy = np.linalg.norm(self.state.robot.pos - self.state.enemy_pos)
+        safety_distance = self.state.robot.radius + Config.ENEMY_RADIUS_MM + 50  # 350mm
+        
+        if dist_to_enemy < safety_distance:
+            # Trop proche de l'adversaire → ARRÊT IMMÉDIAT
+            self.state.robot.wheel_speeds = [0.0, 0.0, 0.0]
+            self.state.robot.base_velocity = np.array([0.0, 0.0])
+            self.state.robot.base_velocity_global = np.array([0.0, 0.0])
+            self.state.pause_robot = True
+            self.state.error_message = "Trop proche de l'adversaire"
+            
+            # TODO: INTERFAÇAGE MOTEURS - Arrêt sécurité
+            # motor_controller.emergency_stop()
+            return
+        
+        # ===== 4. CALCUL DIRECTION (SUIVI DE CHEMIN A*) =====
+        nav_result = compute_navigation_direction(
+            robot=self.state.robot,
+            target_pos=self.state.target_pos,
+            enemy_pos=self.state.enemy_pos,
+            table_width_mm=Config.TABLE_WIDTH_MM,
+            table_height_mm=Config.TABLE_HEIGHT_MM,
+            path_recompute_interval=Config.PATH_RECOMPUTE_INTERVAL,
+            force_recompute=False
+        )
+        
+        direction = nav_result['direction']
+        
+        if nav_result['reached']:
+            # Chemin terminé, arrêter le robot
+            self.state.robot_moving = False
+            
+            # TODO: INTERFAÇAGE MOTEURS - Arrêt fin de trajectoire
+            # motor_controller.set_wheel_speeds([0, 0, 0])
+            return
+        
+        # ===== 5. CINÉMATIQUE: DIRECTION → VITESSES ROUES =====
+        # Calcul vitesses normalisées [-1, 1]
+        raw_speeds = compute_wheel_speeds_global(
+            self.state.robot,
+            direction[0],  # vx
+            direction[1],  # vy
+            0.0            # omega (pas de rotation sur place)
+        )
+        
+        # Conversion en mm/tick puis m/s
+        max_speed_mm_tick = (Config.MAX_WHEEL_SPEED_MPS * 1000) / Config.TICKS_PER_SECOND
+        new_speeds = [s * max_speed_mm_tick for s in raw_speeds] if not self.state.pause_robot else [0, 0, 0]
+        
+        # ===== 6. LISSAGE VITESSES (ANTI-OSCILLATIONS) =====
+        if not hasattr(self.state.robot, 'wheel_speeds_history'):
+            self.state.robot.wheel_speeds_history = [[], [], []]
+        
+        for i in range(3):
+            self.state.robot.wheel_speeds_history[i].append(new_speeds[i])
+            if len(self.state.robot.wheel_speeds_history[i]) > 5:
+                self.state.robot.wheel_speeds_history[i].pop(0)
+            # Moyenne mobile sur 5 frames (~83ms)
+            self.state.robot.wheel_speeds[i] = np.mean(self.state.robot.wheel_speeds_history[i])
+        
+        # ===== 7. ENVOI COMMANDES MOTEURS =====
+        # TODO: INTERFAÇAGE MOTEURS - Commandes CAN/UART
+        # Conversion mm/tick → RPM ou autre unité moteur
+        # 
+        # Exemple conversion vers RPM:
+        # wheel_radius_mm = 30  # Rayon de vos roues
+        # for i in range(3):
+        #     speed_mm_s = self.state.robot.wheel_speeds[i] * Config.TICKS_PER_SECOND
+        #     speed_rad_s = speed_mm_s / wheel_radius_mm
+        #     rpm = (speed_rad_s * 60) / (2 * math.pi)
+        #     motor_controller.set_motor_rpm(motor_id=i, rpm=rpm)
+        #
+        # OU directement si votre contrôleur accepte des vitesses normalisées:
+        # motor_controller.set_wheel_speeds_normalized([
+        #     raw_speeds[0],  # Roue 1 (90°)
+        #     raw_speeds[1],  # Roue 2 (210°)
+        #     raw_speeds[2]   # Roue 3 (330°)
+        # ])
+        
+        # ===== 8. VÉRIFICATION OBJECTIF ATTEINT =====
+        dist_to_target = np.linalg.norm(self.state.robot.pos - self.state.target_pos)
+        if dist_to_target < Config.TARGET_RADIUS_MM + self.state.robot.radius:
+            # Objectif atteint
+            
+            # TODO: INTERFAÇAGE STRATÉGIE - Nouvel objectif
+            # self.state.target_pos = strategy.get_next_objective()
+            # OU pour test:
+            # self.state.target_pos = Utils.random_position()
+            
+            reset_pathfinding_state()  # Réinitialiser l'état du pathfinding
     
     def _print_debug(self, algo_time, render_time):
         """Affiche les infos de debug."""

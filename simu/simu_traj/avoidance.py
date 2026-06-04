@@ -10,6 +10,7 @@ REPULSE_RADIUS_ROBOT = 800
 REPULSE_RADIUS_OB = 180
 MARGIN_FROM_EDGE = 25
 LOCAL_WINDOW_SIZE_MM = 1000  # carré de 1000 mm autour du robot
+MARGIN_FROM_OBS=100
 
 # --- Dimensions réelles de la table (en mm) ---
 TABLE_WIDTH_MM = 3000
@@ -35,15 +36,23 @@ def create_obstacle(x_left, y_bottom, width, height):
     """
     return pygame.Rect(x_left, y_bottom, width, height)
 
+# ajouter un boolean pour activer/desactiver chaque obstacles inépendament
+
 obstacles_rect = [
-    create_obstacle(650, 1800, 400, 200),    # Haut à gauche
-    create_obstacle(1050, 1550, 900, 450),   # Haut au centre
-    create_obstacle(1950, 1800, 400, 200),   # Haut à droite
-    create_obstacle(0, 650, 450, 450),       # Milieu à gauche
-    create_obstacle(0, 0, 450, 150),         # Bas à gauche
-    create_obstacle(2000, 0, 450, 150),      # Bas à droite
-    create_obstacle(1550, 0, 450, 450)       # Bas au centre
+    create_obstacle(600, 1550, 2400, 450),    # Haut 
+    create_obstacle(150, 1110, 100, 200),    # ob1
+    create_obstacle(150, 400, 100, 200),    # ob2
+    create_obstacle(1000, 150, 200, 100),    # ob3
+    create_obstacle(1050, 750, 200, 100),    # ob4  
+    create_obstacle(1800, 150, 200, 100),    # ob3
+    create_obstacle(1750, 750, 200, 100),    # ob4
+    create_obstacle(2750, 1110, 100, 200),    # ob1
+    create_obstacle(2750, 400, 100, 200),    # ob2
 ]
+obstacles_active = [True for _ in obstacles_rect]
+obstacles_active.append(True)# pour l'ennemi
+obstacles_active[3]= False
+obstacles_active[6]= False
 
 def normalize(v):
     norm = np.linalg.norm(v)
@@ -158,8 +167,8 @@ def get_all_obstacles(obstacles_rect, enemy_pos, robot_radius_mm):
     enemy_rect = pygame.Rect(
         enemy_pos[0] - robot_radius_mm,
         enemy_pos[1] - robot_radius_mm,
-        2 * robot_radius_mm,
-        2 * robot_radius_mm
+        3 * robot_radius_mm,
+        3 * robot_radius_mm
     )
     return obstacles_rect + [enemy_rect]
 
@@ -172,12 +181,14 @@ def create_occupancy_grid(obstacles_rect, cell_size, grid_width, grid_height, ro
         if 0 <= cx < grid_width and 0 <= cy < grid_height:
             grid[cx][cy] = 1
 
-    for rect in obstacles_rect:
+    for rect,active in zip(obstacles_rect,obstacles_active):
+        if not active:
+            continue
         # Agrandir le rectangle de l'obstacle d'une marge égale au rayon du robot
-        left = (rect.left - robot_radius_mm) // cell_size
-        right = (rect.right + robot_radius_mm - 1) // cell_size
-        top = (rect.top - robot_radius_mm) // cell_size
-        bottom = (rect.bottom + robot_radius_mm - 1) // cell_size
+        left = (rect.left - MARGIN_FROM_OBS) // cell_size
+        right = (rect.right + MARGIN_FROM_OBS - 1) // cell_size
+        top = (rect.top - MARGIN_FROM_OBS) // cell_size
+        bottom = (rect.bottom + MARGIN_FROM_OBS - 1) // cell_size
 
         for x in range(int(left), int(right) + 1):
             for y in range(int(top), int(bottom) + 1):
@@ -250,12 +261,13 @@ def compute_direction_astar(robot, target, obstacles_rect, table_width, table_he
     grid = create_occupancy_grid(all_obstacles, CELL_SIZE, GRID_WIDTH, GRID_HEIGHT, robot.radius)
 
     # Détermine le code de retour selon le statut
-    if status == "obstacle":
-        return [], [], 0 ,grid # Cible dans un décor interdit
-    elif status == "enemy":
+    # SÉCURITÉ DÉSACTIVÉE: La cible peut être dans un obstacle
+    # if status == "obstacle":
+    #     return [], [], 0 ,grid # Cible dans un décor interdit
+    if status == "enemy":
         code = 1  # Cible sur l'ennemi
     else:
-        code = 2  # Cible libre
+        code = 2  # Cible libre (ou dans obstacle, on essaie quand même)
 
     start_cell = pos_to_cell(robot.pos)
     goal_cell = pos_to_cell(target)
@@ -336,10 +348,10 @@ def get_escape_direction(robot_pos, enemy_pos, obstacles_rect):
 def check_target_validity(target, robot_radius_mm, enemy_pos, obstacles_rect):
     """Vérifie dans quel cas se trouve la cible"""
     # Vérifie si cible est dans une zone interdite (décor)
-    for rect in obstacles_rect:
-        inflated_rect = rect.inflate(2 * robot_radius_mm, 2 * robot_radius_mm)
-        if inflated_rect.collidepoint(target[0], target[1]):
-            return "obstacle"
+    #for rect in obstacles_rect:
+    #    inflated_rect = rect.inflate(2 * robot_radius_mm, 2 * robot_radius_mm)
+    #    if inflated_rect.collidepoint(target[0], target[1]):
+    #        return "obstacle"
 
     # Vérifie si la cible est dans la zone ennemie (rayon de sécurité autour de lui)
     enemy_rect = pygame.Rect(
@@ -436,3 +448,135 @@ def get_neighbors(cell, grid):
             if not grid[ny][nx]:  # cell not occupied
                 neighbors.append((nx, ny))
     return neighbors
+
+
+# ============================================================================
+# FONCTION AUTONOME POUR ROBOT RÉEL (SANS CLASSE SIMULATOR)
+# ============================================================================
+
+# Variables globales pour état du pathfinding
+_path_computed = False
+_path_astar = []
+_current_path_index = 1
+_recompute_counter = 0
+_grid = None
+_code = 2  # PATH_CODE_CLEAR par défaut
+
+
+def compute_navigation_direction(robot, target_pos, enemy_pos, 
+                                 table_width_mm=3000, table_height_mm=2000,
+                                 path_recompute_interval=15,
+                                 force_recompute=False):
+    """
+    Fonction autonome pour calculer la direction de navigation.
+    Utilisable directement sur le robot réel sans la classe Simulator.
+    
+    Args:
+        robot: Objet Robot avec pos, angle, radius, wheel_angles
+        target_pos: np.array([x, y]) position cible en mm
+        enemy_pos: np.array([x, y]) position adversaire en mm
+        table_width_mm: largeur de la table (défaut 3000mm)
+        table_height_mm: hauteur de la table (défaut 2000mm)
+        path_recompute_interval: intervalle de recalcul A* (défaut 15 frames)
+        force_recompute: bool, forcer le recalcul du chemin
+    
+    Returns:
+        dict: {
+            'direction': np.array([dx, dy]) direction normalisée,
+            'path': liste des cellules du chemin A*,
+            'code': code d'état (0=obstacle, 1=enemy, 2=clear, 4=unreachable),
+            'grid': grille d'occupation,
+            'reached': bool, True si objectif atteint,
+            'error_message': str ou None,
+            'should_pause': bool, True si robot doit s'arrêter
+        }
+    """
+    global _path_computed, _path_astar, _current_path_index, _recompute_counter, _grid, _code
+    
+    # ===== 1. GESTION DU RECALCUL PÉRIODIQUE =====
+    if force_recompute:
+        _path_computed = False
+    
+    if not _path_computed:
+        # Calculer A* avec obstacles fixes + ennemi
+        direction, path, code, grid = compute_direction_astar(
+            robot,
+            target_pos,
+            obstacles_rect,  # Obstacles fixes
+            table_width_mm,
+            table_height_mm,
+            enemy_pos
+        )
+        _path_astar = path
+        _code = code
+        _grid = grid
+        _path_computed = True
+        _recompute_counter = 0
+        _current_path_index = 1
+    else:
+        # Incrémenter compteur pour recalcul périodique
+        _recompute_counter += 1
+        if _recompute_counter > path_recompute_interval:
+            _path_computed = False
+    
+    # ===== 2. GESTION DES CODES D'ERREUR =====
+    error_message = None
+    should_pause = False
+    
+    PATH_CODE_OBSTACLE = 0
+    PATH_CODE_UNREACHABLE = 4
+    
+    # MODIFIÉ: Le robot continue même si la cible est dans un obstacle
+    if _code == PATH_CODE_OBSTACLE:
+        error_message = "Cible dans un obstacle (tentative d'approche)"
+        should_pause = False  # Continue quand même
+    elif _code == PATH_CODE_UNREACHABLE:
+        error_message = "Cible inaccessible (bloqué)"
+        should_pause = False
+    
+    # ===== 3. SUIVI DU CHEMIN A* =====
+    # Vérifier si chemin vide
+    if not _path_astar or _current_path_index >= len(_path_astar):
+        direction = np.array([0.0, 0.0])
+        reached = True
+    else:
+        target_cell = _path_astar[_current_path_index]
+        target_pos_mm = cell_to_pos(target_cell)
+        
+        # Vérifier si la cellule est atteinte
+        dist_to_target = np.linalg.norm(robot.pos - target_pos_mm)
+        if dist_to_target < robot.radius:
+            _current_path_index += 1
+            if _current_path_index >= len(_path_astar):
+                direction = np.array([0.0, 0.0])
+                reached = True
+            else:
+                target_cell = _path_astar[_current_path_index]
+                target_pos_mm = cell_to_pos(target_cell)
+                direction = normalize(target_pos_mm - robot.pos)
+                reached = False
+        else:
+            direction = normalize(target_pos_mm - robot.pos)
+            reached = False
+    
+    # ===== 4. RETOUR DU RÉSULTAT =====
+    return {
+        'direction': direction,
+        'path': _path_astar,
+        'code': _code,
+        'grid': _grid,
+        'reached': reached,
+        'error_message': error_message,
+        'should_pause': should_pause
+    }
+
+
+def reset_pathfinding_state():
+    """Réinitialise l'état du pathfinding (utile au démarrage du match)."""
+    global _path_computed, _path_astar, _current_path_index, _recompute_counter, _grid, _code
+    _path_computed = False
+    _path_astar = []
+    _current_path_index = 1
+    _recompute_counter = 0
+    _grid = None
+    _code = 2  # PATH_CODE_CLEAR
