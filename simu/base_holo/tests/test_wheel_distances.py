@@ -5,7 +5,7 @@ Vérifie que les calculs sont corrects et cohérents
 
 import numpy as np
 import math
-from holo_base import Robot, compute_wheel_distances_global, compute_wheel_distances_direction
+from core.holo_base import Robot, compute_wheel_distances_global, compute_wheel_distances_direction
 
 def test_wheel_distances():
     """Test des fonctions de calcul de distances."""

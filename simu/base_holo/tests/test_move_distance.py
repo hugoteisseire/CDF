@@ -5,7 +5,7 @@ Exécutez ce script pour vérifier que la nouvelle fonctionnalité fonctionne.
 
 import time
 import can
-from motor_controller import Motor
+from core.motor_controller import Motor
 from mks_servo_can import MksServo
 
 def test_move_distance():

@@ -6,7 +6,7 @@ import random
 import time
 import psutil
 import os
-from holo_base import (
+from core.holo_base import (
     Robot,
     compute_wheel_speeds_global,
     compute_base_velocity,
@@ -14,6 +14,8 @@ from holo_base import (
     rotate_vector,
     shortest_angle_diff
 )
+# TODO: avoidance.py se trouve dans simu/simu_traj/ (pas dans ce dossier).
+#       Cet import ne fonctionne pas tant qu'il n'est pas rendu accessible.
 from avoidance import compute_direction_champ, clamp_position, obstacles_rect,compute_direction_astar,cell_to_pos,compute_direction_gbfs,CELL_SIZE,normalize
 
 

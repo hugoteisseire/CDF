@@ -7,9 +7,9 @@ import time
 import numpy as np
 import math
 import can
-from motor_controller import Motor, MotorGroup
+from core.motor_controller import Motor, MotorGroup
 from mks_servo_can import MksServo
-from holo_base import Robot, compute_wheel_distances_global, compute_wheel_distances_direction
+from core.holo_base import Robot, compute_wheel_distances_global, compute_wheel_distances_direction
 
 # =============================
 #   CONFIGURATION CAN ET MOTEURS

@@ -11,14 +11,16 @@ import numpy as np
 from dataclasses import dataclass
 
 # --- Custom library imports ---
-from lib_moteur import (
+from legacy.lib_moteur import (
     read_motor_speed, read_motor_position, move_relative, reset_zero,
     stop_pos_soft, move_velocity, stop_velocity_soft, calibrate
 )
-from holo_base import (
+from core.holo_base import (
     Robot, compute_wheel_speeds_global, compute_base_velocity,
     compute_rotation_velocity, rotate_vector, shortest_angle_diff
 )
+# TODO: avoidance.py se trouve dans simu/simu_traj/ (pas dans ce dossier).
+#       Cet import ne fonctionne pas tant qu'il n'est pas rendu accessible.
 from avoidance import (
     compute_direction_champ, clamp_position, obstacles_rect,
     compute_direction_astar, cell_to_pos, compute_direction_gbfs,

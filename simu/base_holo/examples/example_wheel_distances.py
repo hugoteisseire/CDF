@@ -6,7 +6,7 @@ pour déplacer le robot d'une distance donnée dans une direction spécifique.
 
 import numpy as np
 import math
-from holo_base import Robot, compute_wheel_distances_global, compute_wheel_distances_direction
+from core.holo_base import Robot, compute_wheel_distances_global, compute_wheel_distances_direction
 
 # =============================
 #   CONFIGURATION DU ROBOT
@@ -164,7 +164,7 @@ print("""
 Pour utiliser ces distances avec la classe Motor, voici un exemple :
 
 ```python
-from motor_controller import Motor, MotorGroup
+from core.motor_controller import Motor, MotorGroup
 
 # Déplacement de 100mm vers le nord
 distances = compute_wheel_distances_direction(

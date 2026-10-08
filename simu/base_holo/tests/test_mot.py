@@ -4,7 +4,7 @@ from mks_servo_can import MksServo
 from mks_servo_can.mks_enums import WorkMode, CalibrationResult, Direction, RunMotorResult
 
 
-from lib_moteur import (
+from legacy.lib_moteur import (
     read_motor_speed, read_motor_position, move_relative, reset_zero,
     stop_pos_soft, move_velocity, stop_velocity_soft, calibrate
 )

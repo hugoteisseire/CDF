@@ -4,13 +4,12 @@ Inclut des tests du mode asynchrone avec thread daemon.
 """
 
 import time
-from turtle import speed
 import can
 import numpy as np
-from motor_controller import Motor, MotorGroup
+from core.motor_controller import Motor, MotorGroup
 from mks_servo_can.mks_enums import WorkMode, CalibrationResult, Direction, RunMotorResult
 from mks_servo_can import MksServo
-from holo_base import Robot, compute_wheel_speeds_global,compute_wheel_distances_global
+from core.holo_base import Robot, compute_wheel_speeds_global,compute_wheel_distances_global
 
 # =============================
 #   CONFIGURATION CAN
