@@ -24,7 +24,7 @@ def test_move_distance():
     
     # Création du moteur avec paramètres mécaniques
     print("\n[2/5] Création du moteur avec paramètres mécaniques...")
-    servo1 = MksServo(bus, notifier, 1)
+    servo1 = MksServo(bus, notifier, 2)
     motor1 = Motor(
         bus=bus,
         can_id=1,
