@@ -19,7 +19,7 @@ def test_move_distance():
     print("\n[1/5] Configuration du bus CAN...")
     bus = can.interface.Bus(interface="socketcan", channel="can0", bitrate=1000000)
     notifier = can.Notifier(bus, [])
-    bus.socket.setblocking(False)
+    #bus.socket.setblocking(False)
     print("✅ Bus CAN initialisé")
     
     # Création du moteur avec paramètres mécaniques
@@ -31,10 +31,11 @@ def test_move_distance():
         mks_servo=servo1,
         enable_async_control=False,
         # Paramètres mécaniques (à adapter à votre système)
-        wheel_diameter_mm=60.0,      # Roue de 60mm
+        wheel_diameter_mm=58.0,      # Roue de 60mm
         steps_per_revolution=200,    # NEMA 17/23
         subdivisions=16,             # Configuré sur le driver
-        gear_ratio=1.0               # Pas de réducteur
+        gear_ratio=1.0,                 # Pas de réducteur
+        notifier=notifier
     )
     print("✅ Moteur créé")
     
@@ -77,9 +78,10 @@ def test_move_distance():
     
     # Test 1 : Avancer de 100mm
     print("\n  📍 Test 1: Avancer de 100mm à 50mm/s")
-    motor1.move_distance(distance_mm=100, speed_mm_s=50, acceleration=150)
-    time.sleep(0.1)  # Petit délai pour démarrage
-    motor1.wait_until_stopped(timeout=10.0)
+    motor1.move_distance(distance_mm=200, speed_rpm=50, acceleration=150)
+   
+    #time.sleep(0.1)  # Petit délai pour démarrage    
+    motor1.wait_until_stopped(timeout=100.0)   
     
     pos1 = motor1.read_position()
     if pos1 is not None:
@@ -92,9 +94,9 @@ def test_move_distance():
     
     # Test 2 : Reculer de 50mm
     print("\n  📍 Test 2: Reculer de 50mm à 100 RPM")
-    motor1.move_distance(distance_mm=-50, speed_rpm=100, acceleration=150)
-    time.sleep(0.1)
-    motor1.wait_until_stopped(timeout=10.0)
+    motor1.move_distance(distance_mm=-200, speed_rpm=800, acceleration=5)
+    #time.sleep(0.5)
+    motor1.wait_until_stopped(timeout=100.0)    
     
     pos2 = motor1.read_position()
     if pos2 is not None:
@@ -113,9 +115,10 @@ def test_move_distance():
     if pos2 is not None:
         dist_to_zero = -motor1.pulses_to_distance(pos2)
         print(f"     Distance à parcourir: {dist_to_zero:.2f} mm")
-        motor1.move_distance(distance_mm=dist_to_zero, speed_mm_s=80, acceleration=200)
-        time.sleep(0.1)
+        motor1.move_distance(distance_mm=dist_to_zero, speed_mm_s=800, acceleration=200)
+      
         motor1.wait_until_stopped(timeout=10.0)
+
         
         final_pos = motor1.read_position()
         if final_pos is not None:

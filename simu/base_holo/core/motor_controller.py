@@ -43,10 +43,11 @@ class Motor:
     
     def __init__(self, bus: can.Bus, can_id: int, mks_servo: Optional[MksServo] = None, 
                  enable_async_control: bool = False,
-                 wheel_diameter_mm: float = 58.0,
+                 wheel_diameter_mm: float = 55.8,
                  steps_per_revolution: int = 200,
                  subdivisions: int = 16,
-                 gear_ratio: float = 15.0/48.0):
+                 gear_ratio: float = 15.0/48.0,
+                 notifier: Optional[can.Notifier] = None):
         """
         Initialise un moteur.
         
@@ -64,7 +65,10 @@ class Motor:
         self.can_id = can_id
         self.servo = mks_servo
         self.state = MotorState()
-        
+        self._rx = None
+        if notifier is not None:
+            self._rx = can.BufferedReader()
+            notifier.add_listener(self._rx)
         # Paramètres mécaniques pour conversions distance/pulses
         self.wheel_diameter_mm = wheel_diameter_mm
         self.steps_per_revolution = steps_per_revolution
@@ -81,6 +85,46 @@ class Motor:
         
         if enable_async_control:
             self.start_async_control()
+
+    def _query(self, opcode: int, resp_len: int, timeout: float) -> Optional[can.Message]:
+        """Requête de lecture au format du manuel ([code, CRC], DLC 2) et attente de la réponse."""
+        if self._rx is not None:
+            while self._rx.get_message(0) is not None:   # purge des trames anciennes
+                pass
+        crc = (self.can_id + opcode) & 0xFF
+        self.bus.send(can.Message(arbitration_id=self.can_id, data=[opcode, crc], is_extended_id=False))
+        deadline = time.perf_counter() + timeout
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return None
+            msg = self._rx.get_message(remaining) if self._rx is not None else self.bus.recv(remaining)
+            if msg is None:
+                return None
+            if msg.arbitration_id != self.can_id or len(msg.data) != resp_len or msg.data[0] != opcode:
+                continue
+            if msg.data[-1] != (self.can_id + sum(msg.data[:-1])) & 0xFF:
+                continue
+            return msg
+
+    def read_speed(self, timeout: float = 0.2) -> Optional[int]:
+        msg = self._query(0x32, 4, timeout)
+        if msg is None:
+            return None
+        speed = int.from_bytes(msg.data[1:3], byteorder="big", signed=True)
+        self.state.speed = speed
+        self.state.last_update = time.time()
+        return speed
+
+    def read_position(self, timeout: float = 0.1) -> Optional[int]:
+        msg = self._query(0x31, 8, timeout)
+        if msg is None:
+            return None
+        raw = int.from_bytes(msg.data[1:7], byteorder="big", signed=True)
+        position = round(-raw * (self.steps_per_revolution * self.subdivisions) / 0x4000)
+        self.state.position = position
+        self.state.last_update = time.time()
+        return position
     
     def start_async_control(self) -> None:
         """Démarre le thread daemon de contrôle asynchrone."""
@@ -202,28 +246,16 @@ class Motor:
     # =============================
     
     @staticmethod
+    def rpm_s_to_acc(rpm_per_s: float) -> int:
+        """acc = 256 - 20000/a (manuel p.69). 0 = pas de rampe, jamais renvoyé pour une vraie rampe."""
+        if rpm_per_s <= 0:
+            return 0
+        n = round(20000 / rpm_per_s)          # n = 256 - acc
+        return 256 - max(1, min(255, n))      # [1, 255] : on plafonne à la rampe la plus lente
+
+    @staticmethod
     def linear_to_acc(accel_pulses_s2: float) -> int:
-        """
-        Convertit une accélération linéaire en paramètre MKS.
-        
-        Formule : acc_param = 256 - (20000 / a_linear[pulses/s²])
-        
-        Args:
-            accel_pulses_s2: Accélération en pulses/s²
-            
-        Returns:
-            Paramètre d'accélération MKS (0-255)
-        """
-        if accel_pulses_s2 <= 0:
-            return 255  # Accélération instantanée
-        
-        # Conversion depuis pulses/s² vers RPM/s
-        rpm_per_s = accel_pulses_s2 * 60 / Motor.TICKS_PER_REVOLUTION
-        
-        # Formule MKS : acc = 256 - (20000 / rpm_per_s)
-        acc = 256 - (20000 / rpm_per_s)
-        
-        return max(0, min(255, int(acc)))
+        return Motor.rpm_s_to_acc(accel_pulses_s2 * 60 / Motor.TICKS_PER_REVOLUTION)
     
     @staticmethod
     def acc_to_linear(acc_param: int) -> float:
@@ -339,7 +371,8 @@ class Motor:
         speed_mm_s: Optional[float] = None,
         speed_rpm: Optional[int] = None,
         acceleration: int = 100,
-        direction: Optional[int] = None
+        direction: Optional[int] = None,
+        acceleration_mks: Optional[int] = None
     ) -> None:
         """
         Déplace la roue d'une distance linéaire précise.
@@ -374,17 +407,19 @@ class Motor:
         
         # Conversion distance -> pulses
         pulses = self.distance_to_pulses(distance_mm)
+
         
         # Gestion de la direction
         if direction is None:
-            direction = 1 if distance_mm < 0 else 0
+            direction = 0 if distance_mm < 0 else 1
         
         # Appel de la méthode move_relative existante
         self.move_relative(
             pulses=abs(pulses),
             speed=rpm,
             acceleration=acceleration,
-            direction=direction
+            direction=direction,
+            acceleration_mks=acceleration_mks
         )
         
         print(f"🎯 Déplacement: {distance_mm:.1f}mm ({pulses} pulses) à {rpm} RPM")
@@ -398,7 +433,8 @@ class Motor:
         pulses: int, 
         speed: int, 
         acceleration: int = 100,
-        direction: Optional[int] = None
+        direction: Optional[int] = None,
+        acceleration_mks: Optional[int] = None
     ) -> None:
         """
         Effectue un mouvement relatif.
@@ -414,15 +450,25 @@ class Motor:
             direction = 1 if pulses < 0 else 0
             pulses = abs(pulses)
         
-        # Conversion accélération si nécessaire
-        #if acceleration > 255:
-        acceleration = self.linear_to_acc(acceleration)
-        
+        # Conversion de l'accélération
+        if acceleration_mks is not None:
+            # Valeur MKS calculée en amont : aucune reconversion
+            Mks_acceleration = int(acceleration_mks)
+
+        elif acceleration > 255:
+            # Accélération exprimée en pulses/s²
+            Mks_acceleration = self.linear_to_acc(acceleration)
+
+        else:
+            # Accélération déjà exprimée dans l'unité MKS
+            Mks_acceleration = int(acceleration)
+
+        print(f"⚡ Accélération MKS : {Mks_acceleration}")
         # Validation
         if not (0 <= speed <= 3000):
             raise ValueError(f"Speed must be 0-3000 RPM, got {speed}")
-        if not (0 <= acceleration <= 255):
-            raise ValueError(f"Acceleration must be 0-255, got {acceleration}")
+        if not (0 <= Mks_acceleration <= 255):
+            raise ValueError(f"Acceleration must be 0-255, got {Mks_acceleration}")
         if not (0 <= pulses <= 0xFFFFFF):
             raise ValueError(f"Pulses must be 0-{0xFFFFFF}, got {pulses}")
         
@@ -432,7 +478,7 @@ class Motor:
         speed_low = speed & 0xFF
         pulse_bytes = [(pulses >> shift) & 0xFF for shift in (16, 8, 0)]
         
-        data = [code, speed_high, speed_low, acceleration] + pulse_bytes
+        data = [code, speed_high, speed_low, Mks_acceleration] + pulse_bytes
         crc = (int(self.can_id) + int(sum(data))) & 0xFF
         data.append(crc)
         
@@ -562,95 +608,7 @@ class Motor:
     # =============================
     #   LECTURE D'ÉTAT
     # =============================
-    
-    def read_speed(self, timeout: float = 0.2) -> Optional[int]:
-        """
-        Lit la vitesse actuelle du moteur.
-        
-        Args:
-            timeout: Délai d'attente maximal (secondes)
-            
-        Returns:
-            Vitesse en RPM (signée), ou None si échec
-        """
-        opcode = 0x32
-        msg_data = [opcode, opcode]
-        crc = (int(self.can_id) + int(sum(msg_data))) & 0xFF
-
-        
-        msg = can.Message(
-            arbitration_id=self.can_id,
-            data=msg_data + [crc],
-            is_extended_id=False
-        )
-        msg.dlc = 3
-        
-        try:
-            self.bus.send(msg)
-        except can.CanError as e:
-            print(f"⚠️ CAN error: {e}")
-            return None
-        
-        start = time.time()
-        while time.time() - start < timeout:
-            response = self.bus.recv(0.0)
-            if response and response.arbitration_id == self.can_id and len(response.data) == 4:
-                if response.data[0] != opcode:
-                    continue
-                
-                expected_crc = (self.can_id + sum(response.data[:-1])) & 0xFF
-                if response.data[-1] != expected_crc:
-                    continue
-                
-                speed = int.from_bytes(response.data[1:3], byteorder="big", signed=True)
-                self.state.speed = speed
-                self.state.last_update = time.time()
-                return speed
-        
-        return None
-    
-    def read_position(self, timeout: float = 0.1) -> Optional[int]:
-        """
-        Lit la position actuelle du moteur.
-        
-        Args:
-            timeout: Délai d'attente maximal (secondes)
-            
-        Returns:
-            Position en pulses (int48 signé), ou None si échec
-        """
-        opcode = 0x31
-        msg_data = [opcode, opcode]
-        crc = (int(self.can_id) + int(sum(msg_data))) & 0xFF
-
-        
-        msg = can.Message(
-            arbitration_id=self.can_id,
-            data=msg_data + [crc],
-            is_extended_id=False
-        )
-        
-        self.bus.send(msg)
-        
-        start = time.perf_counter()
-        while time.perf_counter() - start < timeout:
-            response = self.bus.recv(0.0)
-            if response and response.arbitration_id == self.can_id and len(response.data) == 8:
-                if response.data[0] != opcode:
-                    continue
-                
-                expected_crc = (self.can_id + sum(response.data[:-1])) & 0xFF
-                if response.data[-1] != expected_crc:
-                    continue
-                
-                pos_bytes = response.data[1:7]
-                position = int.from_bytes(pos_bytes, byteorder='big', signed=True)
-                self.state.position = position
-                self.state.last_update = time.time()
-                return position
-        
-        return None
-    
+  
     def is_running(self) -> bool:
         """
         Vérifie si le moteur est en mouvement.
@@ -659,13 +617,18 @@ class Motor:
         
         Returns:
             True si le moteur tourne, False sinon
-        """
-        if self.servo:
-            return self.servo.is_motor_running()
+        """ 
+        pos1=self.read_position(timeout=0.05)
+        time.sleep(0.002)
+        pos2=self.read_position(timeout=0.05)        
+        return pos1!=pos2
+        
         
         # Fallback : lire la vitesse
         speed = self.read_speed(timeout=0.05)
         return speed is not None and abs(speed) > 0
+
+        pos=self.read_position()
     
     # =============================
     #   CALIBRATION & RESET
@@ -891,6 +854,7 @@ class MotorGroup:
         """Arrête tous les moteurs."""
         for motor in self.motors:
             motor.stop_relative()
+            print("here")
             motor.start_async_control() # Assure que le contrôle asynchrone est actif   
         velocities = [0 for _ in self.motors]
         self.set_velocities(velocities, max_speed=0)
