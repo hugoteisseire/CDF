@@ -3,6 +3,7 @@ Module de contrôle des moteurs MKS SERVO via CAN bus.
 Fournit une classe Motor pour gérer individuellement chaque moteur.
 """
 
+import math
 import time
 import can
 import threading
@@ -35,14 +36,14 @@ class Motor:
     - Lecture de position et vitesse
     - Calibration et reset
     - Conversion accélération linéaire ↔ paramètre MKS
-    - Thread daemon pour gestion asynchrone des changements de vitesse/direction
     """
     
     # Constantes pour conversion accélération
     TICKS_PER_REVOLUTION = 3200  # 16 subdivisions × 200 pas/tour
+    # Bit de direction d'une roue à vitesse/distance POSITIVE (même convention que move_distance)
+    POSITIVE_DIRECTION = 1
     
     def __init__(self, bus: can.Bus, can_id: int, mks_servo: Optional[MksServo] = None, 
-                 enable_async_control: bool = False,
                  wheel_diameter_mm: float = 55.8,
                  steps_per_revolution: int = 200,
                  subdivisions: int = 16,
@@ -55,7 +56,6 @@ class Motor:
             bus: Interface CAN initialisée
             can_id: ID CAN du moteur (1, 2, 3, etc.)
             mks_servo: Instance MksServo optionnelle (pour fonctions avancées)
-            enable_async_control: Active le thread daemon pour contrôle asynchrone
             wheel_diameter_mm: Diamètre de la roue en mm (par défaut 60mm)
             steps_per_revolution: Nombre de pas par tour moteur (par défaut 200)
             subdivisions: Nombre de subdivisions (par défaut 16)
@@ -78,16 +78,15 @@ class Motor:
         # Calcul des constantes de conversion
         self._update_conversion_constants()
         
-        # Thread de contrôle asynchrone
-        self._stop_event = threading.Event()
-        self._control_thread = None
-        self._async_control_enabled = enable_async_control
-        
-        if enable_async_control:
-            self.start_async_control()
+        self.position_sample: Optional[Tuple[int, float]] = None   # (pulses, perf_counter)
+        self._io_lock = threading.RLock()   # un seul échange requête/réponse à la fois
 
     def _query(self, opcode: int, resp_len: int, timeout: float) -> Optional[can.Message]:
         """Requête de lecture au format du manuel ([code, CRC], DLC 2) et attente de la réponse."""
+        with self._io_lock:
+            return self._query_locked(opcode, resp_len, timeout)
+
+    def _query_locked(self, opcode: int, resp_len: int, timeout: float) -> Optional[can.Message]:
         if self._rx is not None:
             while self._rx.get_message(0) is not None:   # purge des trames anciennes
                 pass
@@ -124,123 +123,9 @@ class Motor:
         position = round(-raw * (self.steps_per_revolution * self.subdivisions) / 0x4000)
         self.state.position = position
         self.state.last_update = time.time()
+        self.position_sample = (position, msg.timestamp if msg.timestamp else time.perf_counter())
         return position
     
-    def start_async_control(self) -> None:
-        """Démarre le thread daemon de contrôle asynchrone."""
-        if self._control_thread is None or not self._control_thread.is_alive():
-            self._stop_event.clear()
-            self._async_control_enabled = True  # Active le flag
-            self._control_thread = threading.Thread(
-                target=self._control_loop,
-                daemon=True,
-                name=f"Motor_{self.can_id}_Control"
-            )
-            self._control_thread.start()
-    
-    def stop_async_control(self) -> None:
-        """Arrête le thread daemon de contrôle asynchrone."""
-        if self._control_thread and self._control_thread.is_alive():
-            self._stop_event.set()
-            self._control_thread.join(timeout=1.0)
-            self._async_control_enabled = False  # Désactive le flag
-    
-    def _control_loop(self) -> None:
-        """
-        Boucle de contrôle asynchrone (thread daemon).
-        Gère automatiquement les changements de vitesse et de direction.
-        """
-        while not self._stop_event.is_set():
-            try:
-                # État 1: Idle - Détection de changements
-                if self.state.control_state == 1:
-                    if self.state.speed != self.state.target_speed:
-                        self.state.control_state = 2  # Changement de vitesse
-                    elif self.state.direction != self.state.target_direction:
-                        self.state.control_state = 3  # Changement de direction
-                
-                # État 2: Changement de vitesse
-                elif self.state.control_state == 2:
-                    if self.state.direction != self.state.target_direction:
-                        self.state.control_state = 3  # Priorité au changement de direction
-                    else:
-                        self._apply_velocity_change()
-                        self.state.speed = self.state.target_speed
-                        self.state.control_state = 1
-                
-                # État 3: Changement de direction
-                elif self.state.control_state == 3:
-                    self._apply_direction_change()
-                    self.state.direction = self.state.target_direction
-                    self.state.speed = self.state.target_speed
-                    self.state.control_state = 1
-                
-                else:
-                    print(f"[ERREUR Motor {self.can_id}] État inconnu: {self.state.control_state}")
-                    self.state.control_state = 1
-                
-                # Petite pause pour éviter une boucle trop rapide
-                time.sleep(0.001)
-                
-            except Exception as e:
-                print(f"[ERREUR Motor {self.can_id}] Exception dans control_loop: {e}")
-                time.sleep(0.01)
-    
-    def _apply_velocity_change(self) -> None:
-        """Applique un changement de vitesse (appelé par le thread)."""
-        self.move_velocity(
-            speed=self.state.target_speed,
-            acceleration=self.state.acceleration,
-            direction=self.state.target_direction
-        )
-    
-    def _apply_direction_change(self) -> None:
-        """
-        Applique un changement de direction (appelé par le thread).
-        Arrête le moteur, attend, puis relance dans la nouvelle direction.
-        """
-        # Arrêt brutal avec direction opposée
-        self.move_velocity(
-            speed=0,
-            acceleration=250,
-            direction= self.state.direction
-        )
-        time.sleep(0.1)  # Pause fixe si pas de servo
-        
-        # Relance dans la nouvelle direction
-        self.move_velocity(
-            speed=self.state.target_speed,
-            acceleration=self.state.acceleration,
-            direction=self.state.target_direction
-        )
-    
-    def set_target_velocity(self, speed: int) -> None:
-        """
-        Définit la vitesse et direction cible (pour contrôle asynchrone).
-        Le thread daemon appliquera les changements automatiquement.
-        
-        Args:
-            speed: Vitesse cible en RPM (0-3000), peut être négative
-            direction: 0=CCW, 1=CW. Si None, déduit du signe de speed
-            acceleration: Accélération (0-255). Si None, utilise la valeur actuelle
-        """
-        if not self._async_control_enabled:
-            raise RuntimeError("Le contrôle asynchrone n'est pas activé. "
-                             "Créez Motor avec enable_async_control=True")
-        
-        # Gestion du sens
-      
-        direction = 1 if speed < 0 else 0
-        speed = abs(speed)
-        
-        # Validation
-        if not (0 <= speed <= 3000):
-            raise ValueError(f"Speed must be 0-3000 RPM, got {speed}")
-        
-        # Mise à jour des cibles
-        self.state.target_speed = speed
-        self.state.target_direction = direction
-        
     # =============================
     #   CONVERSION ACCÉLÉRATION
     # =============================
@@ -719,20 +604,10 @@ class Motor:
         return False
     
     def __repr__(self) -> str:
-        """Représentation textuelle du moteur."""
-        async_status = "async" if self._async_control_enabled else "sync"
         return (
-            f"Motor(id={self.can_id}, "
-            f"pos={self.state.position}, "
-            f"speed={self.state.speed} RPM, "
-            f"target={self.state.target_speed} RPM, "
-            f"dir={'CW' if self.state.direction else 'CCW'}, "
-            f"mode={async_status})"
+            f"Motor(id={self.can_id}, pos={self.state.position}, speed={self.state.speed} RPM, "
+            f"target={self.state.target_speed} RPM, dir={'CW' if self.state.direction else 'CCW'})"
         )
-    
-    def __del__(self):
-        """Nettoyage lors de la destruction de l'objet."""
-        self.stop_async_control()
 
 
 # =============================
@@ -741,198 +616,308 @@ class Motor:
 
 class MotorGroup:
     """
-    Gère plusieurs moteurs simultanément avec synchronisation.
+    Groupe de moteurs d'une base holonome : consignes synchronisées, lecture de position
+    en continu (poller) et watchdog de sécurité.
+
+    Convention de signe UNIQUE pour les deux modes (distance et vitesse) :
+    une vitesse ou une distance de roue POSITIVE => bit de direction Motor.POSITIVE_DIRECTION
+    (comme Motor.move_distance). Un même Robot (angle, wheel_angles) sert donc aux deux modes.
     """
-    
-    def __init__(self, motors: list[Motor]):
+
+    def __init__(self, motors: list[Motor], robot=None):
         """
-        Initialise un groupe de moteurs.
-        
         Args:
-            motors: Liste des moteurs à gérer
+            motors: moteurs, dans le même ordre que robot.wheel_angles
+            robot: instance de holo_base.Robot (obligatoire pour move_direction / set_velocity)
         """
         self.motors = motors
-    
-    def move_synchronized(
-        self,
-        wheel_speeds: list[float],
-        max_speed: int,
-        pulses_per_step: int,
-        base_acceleration: float
-    ) -> None:
+        self.robot = robot
+        self._last_sent = [None] * len(motors)     # (rpm, direction, acc) : évite les trames inutiles
+        # watchdog
+        self._wd_timeout = None
+        self._wd_thread = None
+        self._wd_stop = threading.Event()
+        self._last_cmd = time.monotonic()
+        self._moving = False
+        # poller
+        self._poll_thread = None
+        self._poll_stop = threading.Event()
+        self.on_round = None   # callback(samples) appelé après chaque tour de lecture des positions
+
+    # =============================
+    #   OUTILS INTERNES
+    # =============================
+
+    def _require_robot(self):
+        if self.robot is None:
+            raise RuntimeError("MotorGroup a besoin d'un Robot : MotorGroup(motors, robot)")
+
+    @staticmethod
+    def _wheel_rpms(motors, wheel_v_mm_s):
+        """RPM entiers (arrondi au plus proche, plafonné 3000) ; 0 pour une roue immobile."""
+        rpms = []
+        for m, v in zip(motors, wheel_v_mm_s):
+            rpm = round(abs(v) * m.pulses_per_mm * 60 / m.TICKS_PER_REVOLUTION)
+            rpms.append(0 if rpm == 0 and abs(v) < 1e-9 else max(1, min(3000, rpm)))
+        return rpms
+
+    @staticmethod
+    def plan_ramps(rpms, ramp_acc=220, fastest_boost=0):
         """
-        Déplace tous les moteurs de manière synchronisée.
-        
-        Les vitesses et accélérations sont proportionnelles pour que
-        tous les moteurs atteignent leur Vmax et s'arrêtent en même temps.
-        
-        Args:
-            wheel_speeds: Liste des vitesses normalisées (-1.0 à 1.0)
-            max_speed: Vitesse maximale en RPM
-            pulses_per_step: Distance maximale en pulses
-            base_acceleration: Accélération de base en pulses/s²
+        Paramètre acc MKS (0-255) par roue pour que toutes les rampes aient la même durée
+        (manuel p.69 : durée = RPM x (256-acc) x 50 µs). Référence = roue la plus rapide.
+        Une roue très lente est plafonnée à acc=1 (rampe la plus douce possible).
         """
-        max_abs_speed = max(abs(s) for s in wheel_speeds)
-        if max_abs_speed == 0:
-            return
-        
-        for i, (motor, wheel_speed) in enumerate(zip(self.motors, wheel_speeds)):
-            # Calcul du ratio de vitesse
-            speed_ratio = abs(wheel_speed) / max_abs_speed
-            
-            # Vitesse et distance proportionnelles
-            motor_speed = int(speed_ratio * max_speed)
-            pulses = int(speed_ratio * pulses_per_step)
-            
-            # Accélération proportionnelle pour synchronisation
-            accel_pulses_s2 = speed_ratio * base_acceleration
-            
-            # Direction
-            direction = 1 if wheel_speed < 0 else 0
-            
-            # Envoi de la commande
-            motor.move_relative(
-                pulses=pulses,
-                speed=motor_speed,
-                acceleration=accel_pulses_s2,
-                direction=direction
-            )
+        if not 1 <= ramp_acc <= 255:
+            raise ValueError(f"ramp_acc doit être dans [1, 255], reçu {ramp_acc}")
+        active = [r for r in rpms if r > 0]
+        if not active:
+            return [ramp_acc] * len(rpms)
+        max_rpm = max(active)
+        ramp_steps = max_rpm * (256 - ramp_acc)
+        accs = []
+        for r in rpms:
+            if r == 0:
+                accs.append(ramp_acc)
+                continue
+            n = max(1, min(255, round(ramp_steps / r)))
+            acc = 256 - n
+            if r == max_rpm:
+                acc = min(255, acc + fastest_boost)
+            accs.append(acc)
+        return accs
 
-    def move_synchronized_distance(
-        self,
-        distances_mm: list[float],
-        speed_rpm: float,
-        base_acceleration: float
-    ) -> None:
-        
+    def _wd_touch(self, moving: bool):
+        self._last_cmd = time.monotonic()
+        self._moving = moving
+
+    # =============================
+    #   MODE POSITION : DISTANCE DANS UNE DIRECTION
+    # =============================
+
+    def move_direction(self, distance_mm: float, direction_angle: float, speed_mm_s: float = 50,
+                       dtheta: float = 0.0, ramp_acc: int = 220, fastest_boost: int = 0,
+                       wait: bool = True, verbose: bool = True) -> bool:
         """
-        Déplace tous les moteurs de manière synchronisée sur des distances données.
-        
-        Les vitesses et accélérations sont proportionnelles pour que
-        tous les moteurs atteignent leur Vmax et s'arrêtent en même temps.
-        
-        Args:
-            distances_mm: Liste des distances à parcourir en mm
-            speed_rpm: Vitesse maximale en RPM
-            base_acceleration: Accélération de base en pulses/s²
-        """
-        # Conversion des distances en pulses
-        pulses_list = [
-            motor.distance_to_pulses(dist_mm) for motor, dist_mm in zip(self.motors, distances_mm)
-        ]
-        
-        max_pulses = max(abs(pulses) for pulses in pulses_list)
-        if max_pulses == 0:
-            return
-        
-        for i, (motor, pulses) in enumerate(zip(self.motors, pulses_list)):
-            # Calcul du ratio de distance
-            speed_ratio = abs(pulses) / max_pulses
-            
-            # Vitesse proportionnelle
-            motor_speed = int(speed_ratio * speed_rpm)
-            
-            # Accélération proportionnelle pour synchronisation
-            accel_pulses_s2 = speed_ratio * base_acceleration
-            
-            # Direction
-            direction = 1 if pulses < 0 else 0
-            
-            # Envoi de la commande
-            motor.move_relative(
-                pulses=abs(pulses),
-                speed=motor_speed,
-                acceleration=accel_pulses_s2,
-                direction=direction
-            )
+        Déplace le robot de `distance_mm` dans la direction `direction_angle` (repère global,
+        rad) à `speed_mm_s`, avec une éventuelle rotation `dtheta`. Chaque roue reçoit une
+        distance, un RPM entier proportionnel et une rampe de même durée (vitesses
+        proportionnelles à tout instant).
 
-
-
-
-
-    def stop_all(self, acceleration: int = 255) -> None:
-        """Arrête tous les moteurs."""
-        for motor in self.motors:
-            motor.stop_relative()
-            print("here")
-            motor.start_async_control() # Assure que le contrôle asynchrone est actif   
-        velocities = [0 for _ in self.motors]
-        self.set_velocities(velocities, max_speed=0)
-        for motor in self.motors:
-            motor.servo.emergency_stop_motor()
-        return
-       
-        for motor in self.motors:
-            motor.stop_async_control()
-            motor.servo.emergency_stop_motor()
-            motor.move_velocity(speed=0, acceleration=255)
-            motor.move_relative(
-                pulses=abs(1),
-                speed=100,
-                acceleration=800,
-                direction=1
-            )
-
-            
-    
-    def wait_all_stopped(self, timeout: float = 30.0) -> bool:
-        """
-        Attend que tous les moteurs s'arrêtent.
-        
         Returns:
-            True si tous arrêtés, False si timeout
+            True si tous les moteurs se sont arrêtés (ou wait=False), False sur timeout.
         """
-        start = time.time()
-        while time.time() - start < timeout:
-            all_stopped = all(not m.is_running() for m in self.motors)
-            if all_stopped:
+        from .holo_base import compute_wheel_distances_direction
+        self._require_robot()
+        if speed_mm_s <= 0:
+            raise ValueError("speed_mm_s doit être strictement positif")
+        if not 1 <= ramp_acc <= 255:
+            raise ValueError(f"ramp_acc doit être dans [1, 255], reçu {ramp_acc}")
+
+        wheel_d = compute_wheel_distances_direction(
+            self.robot, distance=distance_mm, direction_angle=direction_angle, dtheta=dtheta)
+        pulses = [m.distance_to_pulses(d) for m, d in zip(self.motors, wheel_d)]
+        if verbose:
+            print(f"🎯 move_direction : {distance_mm:.0f} mm à {math.degrees(direction_angle):.0f}°"
+                  + (f" + rotation {math.degrees(dtheta):.0f}°" if dtheta else ""))
+        active = [i for i, p in enumerate(pulses) if p != 0]
+        if not active:
+            return True
+        max_p = max(abs(pulses[i]) for i in active)
+
+        rpms = [0] * len(self.motors)
+        for i in active:
+            v = speed_mm_s * abs(pulses[i]) / max_p
+            rpms[i] = max(1, min(3000, round(v * self.motors[i].pulses_per_mm
+                                             * 60 / self.motors[i].TICKS_PER_REVOLUTION)))
+        accs = self.plan_ramps(rpms, ramp_acc, fastest_boost)
+        if verbose:
+            for i in active:
+                print(f"   Roue {i + 1} : {wheel_d[i]:8.2f} mm ({pulses[i]} pulses) | "
+                      f"{rpms[i]:4d} RPM | acc={accs[i]:3d}")
+
+        self._wd_touch(False)               # mode position : le watchdog ne s'applique pas
+        for i in active:
+            self.motors[i].move_distance(distance_mm=wheel_d[i], speed_rpm=rpms[i],
+                                         acceleration_mks=accs[i])
+        self._last_sent = [None] * len(self.motors)
+        if not wait:
+            return True
+
+        time.sleep(0.1)                     # laisser démarrer
+        est = max(abs(pulses[i]) / (rpms[i] * self.motors[i].TICKS_PER_REVOLUTION / 60)
+                  + rpms[i] * (256 - accs[i]) * 50e-6 for i in active)
+        deadline = time.time() + est + 5.0
+        while time.time() < deadline:
+            if all(not self.motors[i].is_running() for i in active):
                 return True
             time.sleep(0.01)
-        
+        if verbose:
+            print("   ⚠️ Timeout")
         return False
-    
+
+    # =============================
+    #   MODE VITESSE
+    # =============================
+
+    def set_wheel_speeds_mm_s(self, wheel_v_mm_s: list[float], ramp_acc: int = 220,
+                              fastest_boost: int = 0) -> list[tuple]:
+        """
+        Applique des vitesses de roue (mm/s, signées). RPM entiers, rampes de même durée.
+        N'envoie une trame que si la consigne d'une roue a changé. Réarme le watchdog.
+        """
+        if len(wheel_v_mm_s) != len(self.motors):
+            raise ValueError(f"{len(wheel_v_mm_s)} vitesses pour {len(self.motors)} moteurs")
+        rpms = self._wheel_rpms(self.motors, wheel_v_mm_s)
+        accs = self.plan_ramps(rpms, ramp_acc, fastest_boost)
+        cmds = []
+        for i, (m, v, rpm, acc) in enumerate(zip(self.motors, wheel_v_mm_s, rpms, accs)):
+            pos = Motor.POSITIVE_DIRECTION
+            direction = pos if v >= 0 else 1 - pos
+            cmd = (rpm, direction if rpm else 0, acc)
+            cmds.append(cmd)
+            if cmd != self._last_sent[i]:
+                m.move_velocity(cmd[0], cmd[2], direction=cmd[1])
+                self._last_sent[i] = cmd
+        self._wd_touch(any(c[0] for c in cmds))
+        return cmds
+
+    def set_velocity(self, vx: float, vy: float, omega: float = 0.0, ramp_acc: int = 220,
+                     fastest_boost: int = 0) -> list[tuple]:
+        """Vitesse du robot dans le repère global : vx, vy en mm/s, omega en rad/s (+ = anti-horaire)."""
+        from .holo_base import compute_wheel_distances_global
+        self._require_robot()
+        # "distance par seconde" = vitesse de roue
+        wheel_v = compute_wheel_distances_global(self.robot, vx, vy, omega)
+        return self.set_wheel_speeds_mm_s(wheel_v, ramp_acc, fastest_boost)
+
+    def move_velocity_direction(self, direction_angle: float, speed_mm_s: float, omega: float = 0.0,
+                                ramp_acc: int = 220, fastest_boost: int = 0) -> list[tuple]:
+        """
+        Roule en continu à `speed_mm_s` dans la direction `direction_angle` (repère global).
+        Ne s'arrête pas toute seule : rappeler à chaque cycle de commande, finir par stop_all(),
+        et activer start_watchdog() pour freiner si les appels cessent.
+        """
+        return self.set_velocity(speed_mm_s * math.cos(direction_angle),
+                                 speed_mm_s * math.sin(direction_angle),
+                                 omega, ramp_acc, fastest_boost)
+
+    # =============================
+    #   ARRÊT
+    # =============================
+
+    def stop_all(self, acceleration: int = 255, emergency: bool = False) -> None:
+        """
+        Freine tous les moteurs (annule aussi un mouvement relatif en cours).
+        emergency=True : en plus, envoie l'arrêt d'urgence MksServo si disponible.
+        """
+        self._wd_touch(False)
+        for m in self.motors:
+            m.stop_relative()
+        for m in self.motors:
+            m.move_velocity(0, acceleration, direction=0)
+            if emergency and m.servo is not None:
+                m.servo.emergency_stop_motor()
+        self._last_sent = [None] * len(self.motors)
+
+    # =============================
+    #   WATCHDOG
+    # =============================
+
+    def start_watchdog(self, timeout_s: float = 0.3) -> None:
+        """
+        Les MKS gardent leur dernière consigne de vitesse (pas de timeout interne). Si aucune
+        consigne de vitesse n'arrive pendant `timeout_s` alors que les roues tournent,
+        le groupe freine tout seul.
+        """
+        self.stop_watchdog()
+        self._wd_timeout = timeout_s
+        self._wd_stop.clear()
+        self._last_cmd = time.monotonic()
+        self._wd_thread = threading.Thread(target=self._wd_loop, daemon=True, name="MotorGroup_watchdog")
+        self._wd_thread.start()
+
+    def stop_watchdog(self) -> None:
+        if self._wd_thread and self._wd_thread.is_alive():
+            self._wd_stop.set()
+            self._wd_thread.join(timeout=1.0)
+        self._wd_thread = None
+
+    def _wd_loop(self) -> None:
+        while not self._wd_stop.wait(0.02):
+            if self._moving and time.monotonic() - self._last_cmd > self._wd_timeout:
+                print(f"⚠️ Watchdog : aucune consigne depuis {self._wd_timeout:.2f}s, arrêt")
+                try:
+                    self.stop_all(255)
+                except Exception as e:           # ne jamais tuer le thread de sécurité
+                    print(f"⚠️ Watchdog : erreur d'arrêt : {e}")
+
+    # =============================
+    #   LECTURE DE POSITION EN CONTINU
+    # =============================
+
+    def start_polling(self, hz: float = 100.0) -> None:
+        """
+        Lit la position de chaque moteur à `hz` dans un thread. Résultat : motor.position_sample
+        = (pulses, timestamp perf_counter). Les Motor doivent avoir été créés avec notifier=...
+        (un seul lecteur du bus : le Notifier).
+        """
+        if any(m._rx is None for m in self.motors):
+            raise RuntimeError("start_polling : créez chaque Motor avec notifier=notifier")
+        self.stop_polling()
+        self._poll_stop.clear()
+        self._poll_thread = threading.Thread(target=self._poll_loop, args=(1.0 / hz,),
+                                             daemon=True, name="MotorGroup_poller")
+        self._poll_thread.start()
+
+    def stop_polling(self) -> None:
+        if self._poll_thread and self._poll_thread.is_alive():
+            self._poll_stop.set()
+            self._poll_thread.join(timeout=1.0)
+        self._poll_thread = None
+
+    def _poll_loop(self, period: float) -> None:
+        nxt = time.perf_counter()
+        while not self._poll_stop.is_set():
+            for m in self.motors:
+                try:
+                    m.read_position(timeout=min(0.01, period))
+                except Exception as e:
+                    print(f"⚠️ Poller moteur {m.can_id} : {e}")
+            if self.on_round is not None:
+                try:
+                    self.on_round([m.position_sample for m in self.motors])
+                except Exception as e:
+                    print(f"⚠️ Poller : erreur dans on_round : {e}")
+            nxt += period
+            delay = nxt - time.perf_counter()
+            if delay > 0:
+                self._poll_stop.wait(delay)
+            else:
+                nxt = time.perf_counter()        # en retard : on se recale
+
+    def wheel_positions(self) -> list[Optional[tuple]]:
+        """Dernières (pulses, timestamp) de chaque roue (None si pas encore lu)."""
+        return [m.position_sample for m in self.motors]
+
+    # =============================
+    #   LECTURES / ATTENTES
+    # =============================
+
+    def wait_all_stopped(self, timeout: float = 30.0) -> bool:
+        start = time.time()
+        while time.time() - start < timeout:
+            if all(not m.is_running() for m in self.motors):
+                return True
+            time.sleep(0.01)
+        return False
+
     def read_all_positions(self) -> list[Optional[int]]:
-        """Lit les positions de tous les moteurs."""
         return [m.read_position() for m in self.motors]
-    
+
     def read_all_speeds(self) -> list[Optional[int]]:
-        """Lit les vitesses de tous les moteurs."""
         return [m.read_speed() for m in self.motors]
-    
-    def set_velocities(self, wheel_speeds: list[float], max_speed: float = None) -> None:
-        """
-        Applique les vitesses normalisées à chaque moteur du groupe (mode asynchrone).
-        
-        Cette méthode simplifie l'application de vitesses calculées par compute_wheel_speeds_global
-        en gérant automatiquement l'indexation et la conversion vers RPM.
-        
-        Args:
-            wheel_speeds: Liste de vitesses normalisées [-1, 1] ou valeurs RPM
-            max_speed: Vitesse maximale en RPM (multiplie les vitesses normalisées).
-                      Si None, wheel_speeds est interprété comme des valeurs RPM directes.
-        
-        Raises:
-            ValueError: Si le nombre de vitesses ne correspond pas au nombre de moteurs
-            RuntimeError: Si les moteurs ne sont pas en mode asynchrone
-        
-        Example:
-            >>> raw_speeds = compute_wheel_speeds_global(robot, vx, vy, omega)
-            >>> motors.set_velocities(raw_speeds, max_speed=200)
-        """
-        if len(wheel_speeds) != len(self.motors):
-            raise ValueError(
-                f"Nombre de vitesses ({len(wheel_speeds)}) != nombre de moteurs ({len(self.motors)})"
-            )
-        
-        # Vérifier que tous les moteurs sont en mode asynchrone
-        for motor in self.motors:
-            if not motor._async_control_enabled:
-                raise RuntimeError(
-                    f"Le moteur {motor.can_id} n'est pas en mode asynchrone. "
-                    "Appelez motor.start_async_control() d'abord."
-                )
-        
-        # Appliquer les vitesses
-        for i, motor in enumerate(self.motors):
-            speed = wheel_speeds[i] * max_speed if max_speed else wheel_speeds[i]
-            motor.set_target_velocity(int(speed))
+
+    def close(self) -> None:
+        self.stop_watchdog()
+        self.stop_polling()
