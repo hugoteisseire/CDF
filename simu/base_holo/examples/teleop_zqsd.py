@@ -28,7 +28,7 @@ class TeleopDriver:
     """
 
     def __init__(self, robot, motors, speed_mm_s=60.0, rot_rad_s=1.0,
-                 accel_mm_s2=1000.0, rot_accel_rad_s2=4.0, mks_acc=255):
+                 accel_mm_s2=1000.0, rot_accel_rad_s2=4.0, mks_acc=200):
         self.robot, self.motors = robot, motors
         self.speed, self.rot = speed_mm_s, rot_rad_s
         self.accel, self.rot_accel = accel_mm_s2, rot_accel_rad_s2
@@ -79,7 +79,7 @@ class TeleopDriver:
         self._last_sent = [None] * len(self.motors)
 
 
-def run(robot, motors):
+def run(robot, motors,base):
     import os
     import pygame
 
@@ -101,7 +101,7 @@ def run(robot, motors):
                     elif ev.key == pygame.K_UP:
                         drv.speed = min(1000.0, drv.speed + 100)
                     elif ev.key == pygame.K_DOWN:
-                        drv.speed = max(10.0, drv.speed - 10)
+                        drv.speed = max(10.0, drv.speed - 100)
 
             k = pygame.key.get_pressed()
             focused = pygame.key.get_focused()
@@ -123,6 +123,9 @@ def run(robot, motors):
             for i, t in enumerate(lines):
                 screen.blit(font.render(t, True, (230, 230, 230)), (12, 14 + 36 * i))
             pygame.display.flip()
+            x0, y0, th0, _ = base.pose()
+            total_dist, total_rot = base.odometry_stats()
+            print(f"Pose : ({x0:.1f}, {y0:.1f}) mm, θ = {math.degrees(th0):.2f}°,total dist = {total_dist:.1f} mm, total rot = {total_rot:.2f}°")
     finally:
         drv.stop(255)       # freinage max quoi qu'il arrive
         pygame.quit()
@@ -131,16 +134,29 @@ def run(robot, motors):
 if __name__ == "__main__":
     import can
     from mks_servo_can import MksServo
-    from core.motor_controller import Motor
-    gear_ratio = 48/15
+    from core.holo_base import Robot
+    from core.holonomic_base import HolonomicBase
+    from core.motor_controller import Motor, MotorGroup
 
+    gear_ratio = 48 / 15
     bus = can.interface.Bus(interface="socketcan", channel="can0")
     notifier = can.Notifier(bus, [])
-    motors = [Motor(bus, i, MksServo(bus, notifier, i), gear_ratio=gear_ratio) for i in (1, 2, 3)]
-    robot = Robot(pos=[0, 0], angle=-np.pi / 2, radius=150,
+    motors = [Motor(bus, i, MksServo(bus, notifier, i), gear_ratio=gear_ratio, notifier=notifier)
+              for i in (1, 2, 3)]
+    robot = Robot(pos=[0, 0], angle=0, radius=106.5,
                   wheel_angles=[np.radians(120), np.radians(240), np.radians(0)])
+    group = MotorGroup(motors, robot)
+    base = HolonomicBase(robot, group)
     try:
-        run(robot, motors)
+        sign = -1
+        print(f"\n→ mettre HolonomicBase.POSITION_SIGN = {sign}\n")
+        base.POSITION_SIGN = sign
+        base.start_odometry(200)
+        run(robot, motors,base)
+        
     finally:
+        group.stop_all(255)
+        base.stop_odometry()
+        group.close()
         notifier.stop()
         bus.shutdown()

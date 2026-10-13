@@ -40,6 +40,9 @@ class HolonomicBase:
         self._A = np.array([[-math.sin(a), math.cos(a), robot.radius] for a in robot.wheel_angles])
         self._A_inv = np.linalg.inv(self._A)     # exact avec 3 roues (sinon : pseudo-inverse)
 
+        self._dist_mm = 0.0      # longueur de chemin cumulée
+        self._rot_rad = 0.0      # rotation cumulée (en valeur absolue)
+
     # =============================
     #   ODOMÉTRIE
     # =============================
@@ -68,6 +71,12 @@ class HolonomicBase:
             self.robot.pos[0] += c * dxl - s * dyl           # repère robot -> global
             self.robot.pos[1] += s * dxl + c * dyl
             self.robot.angle += dth
+            step = math.hypot(dxl, dyl)
+            if step > 0.05:                 # seuil anti-bruit : ignore les oscillations d'1-2 pulses à l'arrêt
+                self._dist_mm += step
+            if abs(dth) > 1e-4:
+                self._rot_rad += abs(dth)
+
 
     def start_odometry(self, hz: float = 100.0) -> None:
         """Lance le poller du groupe (100 Hz) et met la pose à jour à chaque tour."""
@@ -90,3 +99,12 @@ class HolonomicBase:
         with self._odo_lock:
             self.robot.pos[0], self.robot.pos[1] = x, y
             self.robot.angle = theta
+    def odometry_stats(self):
+        """(distance parcourue en mm, rotation cumulée en degrés)"""
+        with self._odo_lock:
+            return self._dist_mm, math.degrees(self._rot_rad)
+
+    def reset_stats(self):
+        with self._odo_lock:
+            self._dist_mm = 0.0
+            self._rot_rad = 0.0

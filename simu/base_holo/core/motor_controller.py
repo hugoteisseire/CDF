@@ -756,6 +756,27 @@ class MotorGroup:
             print("   ⚠️ Timeout")
         return False
 
+    def rotate(self, angle_rad: float, omega_rad_s: float = 1.0, ramp_acc: int = 220,
+               wait: bool = True, verbose: bool = True) -> bool:
+        """
+        Fait tourner le robot sur lui-même de `angle_rad` (+ = anti-horaire, - = horaire),
+        à la vitesse angulaire `omega_rad_s` (valeur absolue). Les 3 roues parcourent la même
+        distance angle*R : même RPM, même rampe. Mode position (s'arrête seul).
+
+        Returns:
+            True si terminé (ou wait=False), False sur timeout.
+        """
+        self._require_robot()
+        if omega_rad_s <= 0:
+            raise ValueError("omega_rad_s doit être strictement positif")
+        if angle_rad == 0:
+            return True
+        speed_mm_s = omega_rad_s * self.robot.radius       # vitesse linéaire de chaque roue
+        if verbose:
+            print(f"🔄 rotate : {math.degrees(angle_rad):.1f}° à {math.degrees(omega_rad_s):.0f}°/s")
+        return self.move_direction(0.0, 0.0, speed_mm_s, dtheta=angle_rad,
+                                   ramp_acc=ramp_acc, wait=wait, verbose=verbose)
+
     # =============================
     #   MODE VITESSE
     # =============================

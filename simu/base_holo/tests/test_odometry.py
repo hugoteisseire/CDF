@@ -31,14 +31,17 @@ def check_sign(base, dist_mm=100.0):
     return votes[0]
 
 
-def check_pose(base, dist_mm=500.0, speed_mm_s=150.0):
+def check_pose(base, dist_mm=np.pi*2, speed_mm_s=500.0):
     x0, y0, th0, _ = base.pose()
-    base.group.move_direction(dist_mm, 0.0, speed_mm_s)          # EST
+    base.group.move_direction(500.0, 0, speed_mm_s,fastest_boost=2,ramp_acc=200)          # EST
+    #base.group.rotate(math.radians(90), omega_rad_s=1.0,ramp_acc=200)  # SUD
     time.sleep(0.3)
     x1, y1, th1, _ = base.pose()
     print(f"Aller  : Δ = ({x1 - x0:.1f}, {y1 - y0:.1f}) mm, Δθ = {math.degrees(th1 - th0):.2f}° "
           f"(consigne : {dist_mm:.0f}, 0, 0)")
-    base.group.move_direction(dist_mm, math.pi, speed_mm_s)      # OUEST
+    time.sleep(1)
+    base.group.move_direction(-500.0, 0, speed_mm_s,fastest_boost=2,ramp_acc=200)      # OUEST
+    #base.group.rotate(-math.radians(90), omega_rad_s=1.0,ramp_acc=200)
     time.sleep(0.3)
     x2, y2, th2, _ = base.pose()
     print(f"Retour : position finale = ({x2 - x0:.1f}, {y2 - y0:.1f}) mm (consigne : 0, 0), "
@@ -57,15 +60,15 @@ if __name__ == "__main__":
     notifier = can.Notifier(bus, [])
     motors = [Motor(bus, i, MksServo(bus, notifier, i), gear_ratio=gear_ratio, notifier=notifier)
               for i in (1, 2, 3)]
-    robot = Robot(pos=[0, 0], angle=np.pi / 2, radius=150,
+    robot = Robot(pos=[0, 0], angle=0, radius=106.5,
                   wheel_angles=[np.radians(120), np.radians(240), np.radians(0)])
     group = MotorGroup(motors, robot)
     base = HolonomicBase(robot, group)
     try:
-        sign = check_sign(base)
+        sign = -1
         print(f"\n→ mettre HolonomicBase.POSITION_SIGN = {sign}\n")
         base.POSITION_SIGN = sign
-        base.start_odometry(100)
+        base.start_odometry(200)
         time.sleep(0.3)
         check_pose(base)
     finally:
