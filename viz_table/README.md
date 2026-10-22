@@ -9,11 +9,18 @@ Plusieurs programmes Python y envoient leurs données via un petit serveur centr
 
 ## Lancement
 
-    python server.py              # le serveur, port 8000
-    python example_robot.py       # exemple : robot + adversaire simulés
-    python example_strategie.py   # exemple : éléments de jeu, reset, ajout/retrait
+    python server.py              # serveur du visualiseur, port 8000
+    python example_robot.py       # programme robot simulé + serveur de protocole local
+    python example_strategie.py   # stratégie + client de protocole local
 
 Ouvrir `http://<ip-de-la-pi>:8000` depuis n'importe quel appareil du réseau.
+
+Le protocole stratégie ↔ robot est documenté dans [ROBOT_PROTOCOL.md](ROBOT_PROTOCOL.md).
+Il utilise une socket Unix locale, indépendamment du serveur web. La stratégie reçoit l'état
+à 50 Hz et peut appeler `robot_link.goto(...)`, `robot_link.velocity(...)`,
+`robot_link.reset_pose(...)` ou `robot_link.stop()`. En cas de déconnexion stratégie,
+le simulateur arrête le mouvement ; à la reconnexion, il reste arrêté jusqu'à une nouvelle commande.
+Le reset de pose n'est pas exposé à l'afficheur.
 `http://<ip-de-la-pi>:8000/state` donne l'état brut des couches (utile pour déboguer).
 
 ## Utiliser l'affichage depuis un de vos programmes
