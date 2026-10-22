@@ -133,7 +133,8 @@ class RobotProtocolServer:
                 pass
 
     def _serve_client(self, conn: socket.socket):
-        conn.setblocking(False)
+        # select() cadence le socket ; les petits envois locaux restent simples.
+        conn.setblocking(True)
         buffer = b""
         # Première trame obligatoire : identification du client.
         deadline = time.monotonic() + 2.0
@@ -179,6 +180,7 @@ class RobotProtocolServer:
                         line, buffer = buffer.split(b"\n", 1)
                         if not line:
                             continue
+                        raw = None
                         try:
                             raw = json.loads(line.decode("utf-8"))
                             command = validate_command(raw)
