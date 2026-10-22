@@ -3,6 +3,7 @@ import logging
 from typing import Coroutine, Optional, Tuple, Union
 from enum import IntEnum
 
+import time
 import serial
 from .utils import ByteEnum
 
@@ -259,10 +260,12 @@ class Response:
             if parsed_tuple is None:
                 continue
             quality, angle, distance = parsed_tuple
+            data_out_buffer = serial.read(length)
+            t_rx_ns = time.monotonic_ns()
             distance = None if distance == 0 else distance
             if output_dict is not None:
                 output_dict[angle] = distance
-            await output_queue.put({"q": quality, "a_deg": angle, "d_mm": distance})
+            await output_queue.put({"q": quality,"a_deg": angle,"d_mm": distance,"t_rx_ns": t_rx_ns,})
         output_queue.task_done()
         Response.logger.info("Completed processing.")
         await asyncio.sleep(0)
