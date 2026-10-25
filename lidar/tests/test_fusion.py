@@ -26,16 +26,131 @@ from lidar.core.lidar_acquisition import LidarAcquisition
 from lidar.core.localizer import Localizer
 from lidar.core.pole_association import AssocParams
 
+import can
+from mks_servo_can import MksServo
+from base_holo.core.holo_base import Robot , compute_wheel_distances_global
+from base_holo.core.holonomic_base import HolonomicBase
+from base_holo.core.motor_controller import Motor, MotorGroup
+
 TAGS = {"matched": "ok", "absent": "absent", "ambiguous": "ambigu"}
 
+LOOP_HZ = 50
+MAX_RPM = 3000
+
+
+class TeleopDriver:
+    """Transforme une commande (ax, ay, aw) ∈ [-1,1] en consignes moteurs, avec rampe LOGICIELLE
+    sur la vitesse du ROBOT (donc les 3 roues restent proportionnelles à tout instant).
+    Les accélérations MKS sont mises au maximum : c'est la rampe logicielle qui décide.
+    """
+
+    def __init__(self, robot, motors, speed_mm_s=60.0, rot_rad_s=1.0,
+                 accel_mm_s2=1000.0, rot_accel_rad_s2=4.0, mks_acc=200):
+        self.robot, self.motors = robot, motors
+        self.speed, self.rot = speed_mm_s, rot_rad_s
+        self.accel, self.rot_accel = accel_mm_s2, rot_accel_rad_s2
+        self.mks_acc = mks_acc
+        self.v = np.zeros(3)            # vitesse courante (vx, vy mm/s ; omega rad/s)
+        self._last_sent = [None] * len(motors)
+
+    @staticmethod
+    def _approach(cur, target, max_delta):
+        return cur + max(-max_delta, min(max_delta, target - cur))
+
+    def step(self, ax, ay, aw, dt):
+        # normalise la commande diagonale pour ne pas aller plus vite à 45°
+        n = math.hypot(ax, ay)
+        if n > 1:
+            ax, ay = ax / n, ay / n
+        target = np.array([ax * self.speed, ay * self.speed, aw * self.rot])
+        # rampe sur le vecteur vitesse robot (direction conservée pendant la rampe)
+        dxy = target[:2] - self.v[:2]
+        dist = float(np.hypot(*dxy))
+        lim = self.accel * dt
+        self.v[:2] = target[:2] if dist <= lim else self.v[:2] + dxy * (lim / dist)
+        self.v[2] = self._approach(self.v[2], target[2], self.rot_accel * dt)
+        return self.apply()
+
+    def wheel_command(self):
+        # "distances" par seconde = vitesses de roues en mm/s (dtheta = omega en rad/s)
+        wheel_v = compute_wheel_distances_global(self.robot, self.v[0], self.v[1], self.v[2])
+        cmds = []
+        for v, m in zip(wheel_v, self.motors):
+            rpm = int(round(abs(v) * m.pulses_per_mm * 60 / m.TICKS_PER_REVOLUTION))
+            rpm = min(rpm, MAX_RPM)
+            cmds.append((rpm, 1 if (v < 0 and rpm) else 0))   # 0 = CCW (= move_distance > 0)
+        return cmds
+
+    def apply(self):
+        cmds = self.wheel_command()
+        for i, (m, c) in enumerate(zip(self.motors, cmds)):
+            if c != self._last_sent[i]:          # on n'envoie que les changements (charge CAN)
+                m.move_velocity(c[0], self.mks_acc, direction=c[1])
+                self._last_sent[i] = c
+        return cmds
+
+    def stop(self, acc=None):
+        self.v[:] = 0
+        for m in self.motors:
+            m.move_velocity(0, self.mks_acc if acc is None else acc, direction=0)
+        self._last_sent = [None] * len(self.motors)
+
+
+def run(group):
+    import os
+    import pygame
+
+    pygame.init()
+    screen = pygame.display.set_mode((460, 200))
+    pygame.display.set_caption("Teleop ZQSD")
+    font = pygame.font.SysFont(None, 26)
+    drv = TeleopDriver(group.robot, group.motors)
+    clock = pygame.time.Clock()
+    running = True
+    try:
+        while running:
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT or (ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE):
+                    running = False
+                elif ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_SPACE:
+                        drv.stop()
+                    elif ev.key == pygame.K_UP:
+                        drv.speed = min(1000.0, drv.speed + 100)
+                    elif ev.key == pygame.K_DOWN:
+                        drv.speed = max(10.0, drv.speed - 100)
+
+            k = pygame.key.get_pressed()
+            focused = pygame.key.get_focused()
+            if focused:
+                ay = (k[pygame.K_z] - k[pygame.K_s])
+                ax = (k[pygame.K_d] - k[pygame.K_q])
+                aw = (k[pygame.K_a] - k[pygame.K_e])   # A = anti-horaire (+)
+            else:
+                ax = ay = aw = 0        # perte de focus => on freine
+
+            dt = clock.tick(LOOP_HZ) / 1000.0
+            cmds = drv.step(ax, ay, aw, dt)
+
+            screen.fill((20, 20, 24))
+            lines = [f"vmax {drv.speed:.0f} mm/s   v=({drv.v[0]:.0f}, {drv.v[1]:.0f}) mm/s  w={drv.v[2]:.2f} rad/s",
+                     "rpm/sens roues : " + "  ".join(f"{r}{'-' if d else '+'}" for r, d in cmds),
+                     "ZQSD bouger | A/E tourner | haut/bas vitesse",
+                     "ESPACE stop | ECHAP quitter"]
+            for i, t in enumerate(lines):
+                screen.blit(font.render(t, True, (230, 230, 230)), (12, 14 + 36 * i))
+            pygame.display.flip()
+
+            #x0, y0, th0, _ = base.pose()
+            #total_dist, total_rot = base.odometry_stats()
+            #print(f"Pose : ({x0:.1f}, {y0:.1f}) mm, θ = {math.degrees(th0):.2f}°,total dist = {total_dist:.1f} mm, total rot = {total_rot:.2f}°")
+    finally:
+        drv.stop(255)       # freinage max quoi qu'il arrive
+        pygame.quit()
 
 def build_base():
     """Même montage que tests/test_odometry.py."""
-    import can
-    from mks_servo_can import MksServo
-    from base_holo.core.holo_base import Robot
-    from base_holo.core.holonomic_base import HolonomicBase
-    from base_holo.core.motor_controller import Motor, MotorGroup
+
 
     gear_ratio = 48 / 15
     bus = can.interface.Bus(interface="socketcan", channel="can0")
@@ -45,6 +160,7 @@ def build_base():
     robot = Robot(pos=[0, 0], angle=0, radius=106.5,
                   wheel_angles=[np.radians(120), np.radians(240), np.radians(0)])
     group = MotorGroup(motors, robot)
+
     return bus, notifier, group, HolonomicBase(robot, group)
 
 
@@ -76,8 +192,11 @@ def format_report(r, ap=None, debug=False) -> str:
 
 
 def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=(0.0, 0.0),
-                   lidar_zero_deg=0.0, stop_event=None):
-    """Affiche en direct la pose, les poteaux connus, les détections et les fenêtres de recherche."""
+                   lidar_zero_deg=0.0, stop_event=None, group=None):
+    """Affiche la fusion lidar et, si un groupe moteur est fourni, intègre la téléopération dans la même fenêtre.
+
+    Une seule boucle Pygame est utilisée : cela évite d'ouvrir/initialiser Pygame depuis plusieurs threads.
+    """
     try:
         import pygame
     except ImportError as exc:
@@ -90,6 +209,7 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
     clock = pygame.time.Clock()
     font = pygame.font.Font(None, 23)
     small = pygame.font.Font(None, 19)
+    driver = TeleopDriver(group.robot, group.motors) if group is not None else None
 
     # Le repère terrain est en millimètres ; Y est inversé à l'écran.
     margin = 260.0
@@ -109,19 +229,75 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
 
     latest = None
     running = True
+    # Profilage léger : moyennes/maxima sur une fenêtre glissante d'environ 1 s.
+    profile_names = ("events", "teleop", "queue", "draw", "flip", "frame")
+    profile = {name: {"sum": 0.0, "max": 0.0, "n": 0} for name in profile_names}
+    profile_started = time.perf_counter()
+    frame_count = 0
+    last_queue_items = 0
+    displayed_profile = {name: (0.0, 0.0) for name in profile_names}
+    displayed_fps = 0.0
+
+    def record_timing(name, elapsed):
+        item = profile[name]
+        item["sum"] += elapsed
+        item["max"] = max(item["max"], elapsed)
+        item["n"] += 1
+
     while running and not (stop_event is not None and stop_event.is_set()):
+        frame_started = time.perf_counter()
+        space_pressed = False
+        t0 = time.perf_counter()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+                elif driver is not None and event.key == pygame.K_SPACE:
+                    space_pressed = True
+                elif driver is not None and event.key == pygame.K_UP:
+                    driver.speed = min(1000.0, driver.speed + 100.0)
+                elif driver is not None and event.key == pygame.K_DOWN:
+                    driver.speed = max(10.0, driver.speed - 100.0)
+        record_timing("events", time.perf_counter() - t0)
 
+        # La limite FPS est isolée du reste : son temps inclut l'attente éventuelle.
+        dt = clock.tick(30) / 1000.0
+        if driver is not None:
+            t0 = time.perf_counter()
+            keys = pygame.key.get_pressed()
+            focused = pygame.key.get_focused()
+            if space_pressed:
+                driver.stop()
+            if focused and running:
+                ay = float(keys[pygame.K_z]) - float(keys[pygame.K_s])
+                ax = float(keys[pygame.K_d]) - float(keys[pygame.K_q])
+                aw = float(keys[pygame.K_a]) - float(keys[pygame.K_e])
+            else:
+                ax = ay = aw = 0.0
+            if running:
+                cmds = driver.step(ax, ay, aw, dt)
+            else:
+                driver.stop()
+                cmds = [(0, 0)] * len(driver.motors)
+            record_timing("teleop", time.perf_counter() - t0)
+        else:
+            cmds = None
+            record_timing("teleop", 0.0)
+
+        t0 = time.perf_counter()
+        queue_items = 0
         try:
             while True:
                 latest = report_queue.get_nowait()
+                queue_items += 1
         except queue.Empty:
             pass
+        last_queue_items = queue_items
+        record_timing("queue", time.perf_counter() - t0)
 
+        t0 = time.perf_counter()
         screen.fill((248, 249, 251))
         # Grille de 500 mm pour faciliter la lecture des coordonnées.
         gx = math.floor(xmin / 500) * 500
@@ -207,9 +383,56 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
         else:
             screen.blit(font.render("En attente du premier tour lidar…", True, (45, 50, 58)), (15, 12))
 
-        pygame.display.flip()
-        clock.tick(30)
+        if driver is not None:
+            control_text = (f"Teleop: ZQSD déplacer | A/E tourner | ESPACE stop | ↑/↓ vitesse "
+                            f"({driver.speed:.0f} mm/s) | roues: " +
+                            " ".join(f"{rpm}{'-' if direction else '+'}" for rpm, direction in cmds))
+            screen.blit(small.render(control_text, True, (35, 40, 48)), (15, height - 52))
 
+        # Mesure du rendu avant d'ajouter le panneau de profilage.
+        draw_elapsed = time.perf_counter() - t0
+        record_timing("draw", draw_elapsed)
+
+        # Publie les statistiques chaque seconde environ, sans écrire sur la console à chaque frame.
+        frame_count += 1
+        now = time.perf_counter()
+        window_elapsed = now - profile_started
+        if window_elapsed >= 1.0:
+            displayed_fps = frame_count / window_elapsed
+            displayed_profile = {
+                name: ((v["sum"] / v["n"] * 1000.0) if v["n"] else 0.0, v["max"] * 1000.0)
+                for name, v in profile.items()
+            }
+            profile = {name: {"sum": 0.0, "max": 0.0, "n": 0} for name in profile_names}
+            profile_started = now
+            frame_count = 0
+
+        report_age_ms = (max(0.0, time.time() - latest.t_s) * 1000.0) if latest is not None else float("inf")
+        panel_lines = [
+            f"UI {displayed_fps:.1f} FPS | rapports reçus: {last_queue_items}",
+            f"âge rapport: {report_age_ms:.0f} ms | localizer: {latest.odo_hz:.1f} odo Hz" if latest is not None else "En attente de rapport",
+            "Calcul par tour (ms): cap / clusters / association / total",
+            (f"{latest.timings_ms['cap_points']:.2f} / {latest.timings_ms['find_clusters']:.2f} / "
+             f"{latest.timings_ms['associate_poles']:.2f} / {latest.timings_ms['total']:.2f}") if latest is not None else "--",
+            "temps UI en ms : moyenne / max (~1 s)",
+        ]
+        for name in ("events", "teleop", "queue", "draw", "flip", "frame"):
+            avg_ms, max_ms = displayed_profile[name]
+            panel_lines.append(f"{name:>6}: {avg_ms:6.2f} / {max_ms:6.2f}")
+        panel_lines.append("tick(30) attend pour limiter les FPS; non inclus dans draw")
+        panel = pygame.Surface((430, 220), pygame.SRCALPHA)
+        panel.fill((255, 255, 255, 225))
+        for i, text_line in enumerate(panel_lines):
+            panel.blit(small.render(text_line, True, (20, 25, 32)), (8, 5 + i * 19))
+        screen.blit(panel, (width - 440, 8))
+
+        t0 = time.perf_counter()
+        pygame.display.flip()
+        record_timing("flip", time.perf_counter() - t0)
+        record_timing("frame", time.perf_counter() - frame_started)
+
+    if driver is not None:
+        driver.stop()
     pygame.quit()
 
 
@@ -238,9 +461,13 @@ def main():
                     help="angle lu par le lidar quand il vise l'axe x du robot (à mesurer ; une erreur ici décale tous les poteaux)")
     ap.add_argument("--debug", action="store_true", help="affiche aussi les clusters de la taille d'un poteau vus par le lidar")
     ap.add_argument("--visualize", action="store_true", help="ouvre une fenêtre pygame de visualisation en direct")
+    ap.add_argument("--pose-only", action="store_true",
+                    help="écrit uniquement timestamp,x,y,theta à chaque nouvelle pose d’odométrie (sans graphique ni logs)")
     args = ap.parse_args()
     if args.no_robot and args.drive:
         ap.error("--drive demande le robot : incompatible avec --no-robot")
+    if args.pose_only and args.visualize:
+        ap.error("--pose-only est incompatible avec --visualize")
 
     if args.no_robot:
         bus = notifier = group = base = None
@@ -256,8 +483,15 @@ def main():
 
     visual_queue = queue.Queue(maxsize=1) if args.visualize else None
 
+    def on_pose(ts, pose):
+        if args.pose_only:
+            x, y, theta = pose
+            print(f"{ts:.6f},{x:.3f},{y:.3f},{math.degrees(theta):.4f}", flush=True)
+
     def on_report(r):
         """Affiche le rapport de traitement d’un tour et publie le dernier pour l’interface."""
+        if args.pose_only:
+            return
         if r.rev_number % args.every == 0:
             print(format_report(r, assoc, args.debug))
         if visual_queue is not None:
@@ -282,10 +516,13 @@ def main():
         time.sleep(0.3)
         acq.start()
         loc = Localizer(pose_source, acq.rev_queue, (args.x0, args.y0, math.radians(args.theta0_deg)),
-                        params=ekf_params, assoc=assoc, on_report=on_report)
+                        params=ekf_params, assoc=assoc, on_report=on_report, on_pose=on_pose)
         loc.start()
-        print(f"Pose initiale : ({args.x0:.0f} mm, {args.y0:.0f} mm, {args.theta0_deg:.1f} deg), "
-              f"incertitude {args.init_std_mm:.0f} mm / {args.init_std_deg:.1f} deg")
+        if args.pose_only:
+            print("timestamp_s,x_mm,y_mm,theta_deg", flush=True)
+        else:
+            print(f"Pose initiale : ({args.x0:.0f} mm, {args.y0:.0f} mm, {args.theta0_deg:.1f} deg), "
+                  f"incertitude {args.init_std_mm:.0f} mm / {args.init_std_deg:.1f} deg")
         
         import threading
         stop_event = threading.Event()
@@ -313,20 +550,22 @@ def main():
                 time.sleep(1.0)
                 s = acq.snapshot()
                 # pts/tour : ~500 attendus (C1, 10 Hz, 5000 pts/s).
-                print(f"  lidar : {s['freq_hz']:5.2f} tours/s | {s['pts_per_s']:5.0f} pts/s | {s['pts_per_rev']:4.0f} pts/tour | "
-                      f"vus {s['revs_seen']} publies {s['revs_published']} rejetes {s['revs_rejected']} "
-                      f"perdus {s['revs_dropped']} | erreurs lib {s['lib_errors']} | rejets {s['reject_reasons'] or '-'}")
+                if not args.pose_only:
+                    print(f"  lidar : {s['freq_hz']:5.2f} tours/s | {s['pts_per_s']:5.0f} pts/s | {s['pts_per_rev']:4.0f} pts/tour | "
+                          f"vus {s['revs_seen']} publies {s['revs_published']} rejetes {s['revs_rejected']} "
+                          f"perdus {s['revs_dropped']} | erreurs lib {s['lib_errors']} | rejets {s['reject_reasons'] or '-'}")
                 if args.drive:
                             from base_holo.tests.test_odometry import check_pose
                             check_pose(base)
 
             if reason is not None and not stop_event.is_set():
-                print(f"\n[DIAGNOSTIC] Arrêt du test : {reason}", flush=True)
-                if acq.error is not None:
+                if not args.pose_only:
+                    print(f"\n[DIAGNOSTIC] Arrêt du test : {reason}", flush=True)
+                if acq.error is not None and not args.pose_only:
                     import traceback
                     print("[DIAGNOSTIC] Traceback du thread lidar :", flush=True)
                     traceback.print_exception(type(acq.error), acq.error, acq.error.__traceback__)
-                if loc.error is not None:
+                if loc.error is not None and not args.pose_only:
                     import traceback
                     print("[DIAGNOSTIC] Traceback du thread de fusion :", flush=True)
                     traceback.print_exception(type(loc.error), loc.error, loc.error.__traceback__)
@@ -334,20 +573,35 @@ def main():
 
         monitor_thread = threading.Thread(target=monitor_test, daemon=True, name="fusion-monitor")
         monitor_thread.start()
+
         if args.visualize:
-            # Pygame et sa boucle d'événements tournent dans le thread principal.
-            run_visualizer(visual_queue, loc.ekf.p.poles_mm, loc.ekf.p.pole_radius_mm,
-                           loc.ekf.p.lidar_offset_mm, loc.ekf.p.lidar_zero_deg, stop_event)
+            # Une seule boucle Pygame dans le thread principal : visualisation + téléopération.
+            # Ne pas appeler run() ici : run() crée sa propre boucle Pygame et bloque l'exécution.
+            run_visualizer(
+                visual_queue,
+                loc.ekf.p.poles_mm,
+                loc.ekf.p.pole_radius_mm,
+                loc.ekf.p.lidar_offset_mm,
+                loc.ekf.p.lidar_zero_deg,
+                stop_event,
+                group=group,
+            )
             stop_event.set()  # fermeture de la fenêtre : demande l'arrêt du test
+        elif group is not None:
+            # Sans visualisation de fusion, conserver la fenêtre de téléopération existante.
+            run(group)
+            stop_event.set()
         else:
             monitor_thread.join()
+
         stop_event.set()
         monitor_thread.join()
-        if acq.error is not None:
+       
+        if not args.pose_only and acq.error is not None:
             print(f"Erreur du thread lidar : {acq.error!r}")
-        if loc.error is not None:
+        if not args.pose_only and loc.error is not None:
             print(f"Erreur du thread de fusion : {loc.error!r}")
-        if acq.clock.recalibrated or loc.odo_clock.recalibrated:
+        if not args.pose_only and (acq.clock.recalibrated or loc.odo_clock.recalibrated):
             print("Note : horloge(s) non epoch recalée(s) sur l'heure système "
                   f"(lidar : {acq.clock.recalibrated}, odométrie : {loc.odo_clock.recalibrated}).")
     except KeyboardInterrupt:
