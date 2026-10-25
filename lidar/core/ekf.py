@@ -34,7 +34,7 @@ class EkfParams:
     """Valeurs de départ du plan (à régler à l'étape 5, pas des valeurs mesurées)."""
 
     # --- terrain ---
-    poles_mm: tuple = ((0.0, 0.0), (2000.0, 0.0), (0.0, 2000.0))   # centres des poteaux
+    poles_mm: tuple = ((3094.0, 72.0), (3094.0, 1928.0), (1725.0, 2120.0))   # centres des poteaux
     pole_radius_mm: float = 50.0                                   # poteaux de 100 mm de diamètre
 
     # --- montage du lidar (à mesurer sur le robot) ---
@@ -65,13 +65,16 @@ class EkfParams:
 
 
 class StateAt(NamedTuple):
+    """Instant de l’historique contenant une pose estimée et sa covariance."""
     x: np.ndarray       # (x mm, y mm, θ rad)
     P: np.ndarray       # 3x3
     clamped: bool       # True si l'instant demandé sort de l'historique (horloges décalées ?)
 
 
 class PoseEKF:
+    """Filtre de Kalman étendu qui estime la pose du robot et propage son incertitude."""
     def __init__(self, params: Optional[EkfParams] = None):
+        """Initialise l’objet et ses ressources à partir des paramètres fournis."""
         self.p = params or EkfParams()
         self.x = np.zeros(3)
         self.P = np.eye(3)

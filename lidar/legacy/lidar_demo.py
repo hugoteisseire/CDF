@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from lidar_core import LidarConfig, LidarService
+from lidar.legacy.lidar_core import LidarConfig, LidarService
 
 
 class Plotter:
@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
         lidar = SimRPLidar()
     else:
-        from rplidarc1 import RPLidar
+        from lidar.rplidarc1 import RPLidar
 
         lidar = RPLidar(args.port, args.baud)
 

@@ -33,14 +33,14 @@ def check_sign(base, dist_mm=100.0):
 
 def check_pose(base, dist_mm=np.pi*2, speed_mm_s=500.0):
     x0, y0, th0, _ = base.pose()
-    base.group.move_direction(500.0, 0, speed_mm_s,fastest_boost=2,ramp_acc=200)          # EST
+    base.group.move_direction( -1500.0, 0, speed_mm_s,fastest_boost=2,ramp_acc=200)          # EST
     #base.group.rotate(math.radians(90), omega_rad_s=1.0,ramp_acc=200)  # SUD
     time.sleep(0.3)
     x1, y1, th1, _ = base.pose()
     print(f"Aller  : Δ = ({x1 - x0:.1f}, {y1 - y0:.1f}) mm, Δθ = {math.degrees(th1 - th0):.2f}° "
           f"(consigne : {dist_mm:.0f}, 0, 0)")
     time.sleep(1)
-    base.group.move_direction(-500.0, 0, speed_mm_s,fastest_boost=2,ramp_acc=200)      # OUEST
+    base.group.move_direction( 1500.0, 0, speed_mm_s,fastest_boost=2,ramp_acc=200)      # OUEST
     #base.group.rotate(-math.radians(90), omega_rad_s=1.0,ramp_acc=200)
     time.sleep(0.3)
     x2, y2, th2, _ = base.pose()

@@ -1,3 +1,5 @@
+"""Exemple autonome d’acquisition et de lecture des mesures du lidar."""
+
 from rplidarc1 import RPLidar
 import asyncio
 import logging

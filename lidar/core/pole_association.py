@@ -19,6 +19,7 @@ class AssocParams:
     # Fenêtre = n_sigma x incertitude attendue de la mesure, bornée par un plancher et un plafond.
     # Au départ (P = 20 mm, 1°) cela donne environ ±3° et ±100 mm, comme dans le plan ; la fenêtre se
     # resserre quand P diminue et s'élargit quand P grandit.
+    """Seuils géométriques et d’incertitude utilisés pour associer les clusters aux poteaux."""
     n_sigma: float = 3.0
     win_angle_min_deg: float = 1.5
     win_angle_max_deg: float = 15.0
@@ -32,6 +33,7 @@ class AssocParams:
 
 @dataclass
 class PoleMatch:
+    """Association d’un cluster à un poteau attendu, avec les résidus de mesure."""
     pole: int
     status: str                         # "matched", "absent" ou "ambiguous"
     n_candidates: int
@@ -46,6 +48,7 @@ class PoleMatch:
 
 @dataclass
 class AssocResult:
+    """Bilan des associations de poteaux pour un tour de lidar."""
     matches: List[PoleMatch]
     n_clusters: int          # clusters du tour
     n_size_ok: int           # ... dont la taille correspond à un poteau
@@ -97,6 +100,7 @@ def associate_poles(ekf: PoseEKF, clusters: List[Cluster], t_ref_s: float,
     matches = []
     for j in range(n_poles):
         lst = cands[j]
+        
         if not lst:
             d_exp, a_exp, H = ekf.measurement(ref.x, j)
             wd, wa = _windows(ekf, ref.P, H, ap)

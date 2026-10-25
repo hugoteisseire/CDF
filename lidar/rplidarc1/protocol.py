@@ -1,3 +1,5 @@
+"""Encodage des commandes et décodage des réponses du RPLIDAR C1."""
+
 import asyncio
 import logging
 from typing import Coroutine, Optional, Tuple, Union
@@ -237,7 +239,7 @@ class Response:
         while not stop_event.is_set():
             if serial.in_waiting < 5:
                 Response.logger.debug("Waiting for data.")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)
                 continue
 
             if not byte_error_handling:
@@ -255,13 +257,12 @@ class Response:
                 continue
             else:
                 byte_error_handling = False
-
+            t_rx_ns = time.monotonic_ns()
             parsed_tuple = Response._parse_simple_scan_result(data_out_buffer)
             if parsed_tuple is None:
                 continue
             quality, angle, distance = parsed_tuple
-            data_out_buffer = serial.read(length)
-            t_rx_ns = time.monotonic_ns()
+            
             distance = None if distance == 0 else distance
             if output_dict is not None:
                 output_dict[angle] = distance

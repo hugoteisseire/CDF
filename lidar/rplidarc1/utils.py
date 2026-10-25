@@ -1,3 +1,5 @@
+"""Types utilitaires utilisés pour représenter les octets du protocole."""
+
 from enum import Enum
 
 """

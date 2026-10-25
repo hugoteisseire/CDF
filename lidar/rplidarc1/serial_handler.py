@@ -1,3 +1,5 @@
+"""Couche de communication série avec le RPLIDAR C1."""
+
 from serial import Serial
 import logging
 

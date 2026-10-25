@@ -55,6 +55,7 @@ def make_scan(pose_fn, circles, t0=T0, n=500, rev_s=0.1, noise_mm=30.0, seed=0, 
 
 
 def static(x, y, th):
+    """Construit un état constant pour les tests de l’EKF."""
     return lambda t: (x, y, th)
 
 
@@ -78,6 +79,7 @@ def cluster_xy(c, x, y, th, radius=50.0):
 # ---------------------------------------------------------------- étape 1/2 : modèle et prédiction
 @pytest.mark.parametrize("offset,zero", [((0.0, 0.0), 0.0), ((30.0, -20.0), 15.0)])
 def test_jacobian_matches_finite_differences(offset, zero):
+    """Vérifie le comportement attendu pour le scénario « jacobian matches finite differences »."""
     ekf = PoseEKF(EkfParams(lidar_offset_mm=offset, lidar_zero_deg=zero))
     rng = np.random.default_rng(1)
     for _ in range(20):
@@ -94,6 +96,7 @@ def test_jacobian_matches_finite_differences(offset, zero):
 
 
 def test_straight_line_adds_20mm_per_meter():
+    """Vérifie le comportement attendu pour le scénario « straight line adds 20mm per meter »."""
     ekf = PoseEKF()
     ekf.reset(0, 0, 0, T0, pos_std_mm=0.0, theta_std_rad=0.0)
     for i in range(1, 201):                                  # 1 m en pas de 5 mm
@@ -104,6 +107,7 @@ def test_straight_line_adds_20mm_per_meter():
 
 
 def test_rotation_adds_about_1_percent():
+    """Vérifie le comportement attendu pour le scénario « rotation adds about 1 percent »."""
     ekf = PoseEKF()
     ekf.reset(0, 0, 0, T0, pos_std_mm=0.0, theta_std_rad=0.0)
     for i in range(1, 201):                                  # 90° en 200 pas
@@ -143,6 +147,7 @@ def test_odometry_with_rotation_matches_holonomic_base_convention():
 
 
 def test_state_at_interpolates_and_flags_out_of_history():
+    """Vérifie le comportement attendu pour le scénario « state at interpolates and flags out of history »."""
     ekf = PoseEKF()
     ekf.reset(0, 0, 0, T0)
     for i in range(1, 21):                                   # 100 mm en 100 ms (1 m/s)
@@ -155,6 +160,7 @@ def test_state_at_interpolates_and_flags_out_of_history():
 
 
 def test_history_is_pruned():
+    """Vérifie le comportement attendu pour le scénario « history is pruned »."""
     ekf = PoseEKF(EkfParams(history_s=0.5))
     ekf.reset(0, 0, 0, T0)
     for i in range(1, 401):
@@ -163,6 +169,7 @@ def test_history_is_pruned():
 
 
 def test_clock_aligner():
+    """Vérifie le comportement attendu pour le scénario « clock aligner »."""
     epoch = ClockAligner("e")
     assert epoch.epoch_s(time.time()) == pytest.approx(time.time(), abs=0.01) and not epoch.recalibrated
     mono = ClockAligner("m")
@@ -175,6 +182,7 @@ def test_clock_aligner():
 
 # ---------------------------------------------------------------- étape 0/3 : clusters
 def test_clusters_find_poles_and_obstacles():
+    """Vérifie le comportement attendu pour le scénario « clusters find poles and obstacles »."""
     circles = POLE_CIRCLES + [(1400.0, 1300.0, 150.0), (1200.0, 1500.0, 50.0)]   # hors des lignes de visée des poteaux
     scan = make_scan(static(1000, 1000, 0.5), circles)
     clusters = find_clusters(cap_points(scan))
@@ -189,6 +197,7 @@ def test_clusters_find_poles_and_obstacles():
 
 def test_cluster_across_zero_degrees_is_merged():
     # cap 225° : le poteau (0, 0) est exactement à l'angle lidar 0°, donc coupé en deux par le début du tour
+    """Vérifie le comportement attendu pour le scénario « cluster across zero degrees is merged »."""
     scan = make_scan(static(1000, 1000, math.radians(225)), POLE_CIRCLES)
     clusters = find_clusters(scan)
     seam = [c for c in clusters if c.seam]
@@ -197,6 +206,7 @@ def test_cluster_across_zero_degrees_is_merged():
 
 
 def test_capping_removes_close_and_far_points():
+    """Vérifie le comportement attendu pour le scénario « capping removes close and far points »."""
     pts = np.zeros(4, dtype=POINT_DTYPE)
     pts["dist"] = [20.0, 100.0, 3000.0, 5000.0]
     assert list(cap_points(pts)["dist"]) == [100.0, 3000.0]
@@ -230,6 +240,7 @@ def test_association_static_random_poses_no_wrong_match():
 
 def test_cluster_outside_all_windows_is_ignored():
     # robot (1000, 1000), cap 0 ; le seul objet est un cylindre de poteau loin de tout poteau attendu
+    """Vérifie le comportement attendu pour le scénario « cluster outside all windows is ignored »."""
     scan = make_scan(static(1000, 1000, 0.0), [(1500.0, 1500.0, 50.0)])
     ekf = make_ekf(1000, 1000, 0.0)
     res = associate_poles(ekf, find_clusters(cap_points(scan)), T0 + 0.05)
@@ -246,6 +257,7 @@ def _parasite_beside_pole(offset_deg):
 
 
 def test_two_candidates_means_skip_pole_and_window_follows_uncertainty():
+    """Vérifie le comportement attendu pour le scénario « two candidates means skip pole and window follows uncertainty »."""
     scan = make_scan(static(1000, 1000, 0.0), POLE_CIRCLES + [_parasite_beside_pole(6.0)])
     clusters = find_clusters(cap_points(scan))
     tight = associate_poles(make_ekf(1000, 1000, 0.0), clusters, T0 + 0.05)
@@ -259,6 +271,7 @@ def test_two_candidates_means_skip_pole_and_window_follows_uncertainty():
 
 
 def test_hidden_pole_is_absent_others_still_matched():
+    """Vérifie le comportement attendu pour le scénario « hidden pole is absent others still matched »."""
     circles = [POLE_CIRCLES[0], POLE_CIRCLES[2]]            # le poteau (2000, 0) est masqué
     scan = make_scan(static(1000, 1000, 0.0), circles)
     res = associate_poles(make_ekf(1000, 1000, 0.0), find_clusters(cap_points(scan)), T0 + 0.05)
@@ -291,11 +304,14 @@ def _fake_rplidar_module():
     import asyncio
 
     class FakeLidar:
+        """Faux lidar utilisé pour tester le pipeline sans port série."""
         def __init__(self, port, baud):
+            """Initialise l’objet et ses ressources à partir des paramètres fournis."""
             self.stop_event, self.output_queue = asyncio.Event(), asyncio.Queue()
             self.reset_called = False
 
         def simple_scan(self, make_return_dict=False):
+            """Produit en continu les mesures simulées sous la même interface que le lidar réel."""
             return self._gen()
 
         async def _gen(self):
@@ -308,6 +324,7 @@ def _fake_rplidar_module():
                 await asyncio.sleep(0.01)
 
         def reset(self):
+            """Réinitialise l’état de l’interface du lidar."""
             self.reset_called = True
 
     mod = types.ModuleType("rplidarc1")
@@ -316,6 +333,7 @@ def _fake_rplidar_module():
 
 
 def test_acquisition_publishes_only_complete_revolutions(monkeypatch):
+    """Vérifie le comportement attendu pour le scénario « acquisition publishes only complete revolutions »."""
     monkeypatch.setitem(sys.modules, "rplidarc1", _fake_rplidar_module())
     from core.lidar_acquisition import LidarAcquisition
 
@@ -342,6 +360,7 @@ def test_acquisition_publishes_only_complete_revolutions(monkeypatch):
 
 # ---------------------------------------------------------------- Localizer de bout en bout (sans robot)
 def test_localizer_end_to_end_static():
+    """Vérifie le comportement attendu pour le scénario « localizer end to end static »."""
     from core.lidar_acquisition import Revolution
 
     pose = (1000.0, 1000.0, 0.5)

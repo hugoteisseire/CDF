@@ -24,6 +24,7 @@ POINT_DTYPE = np.dtype(
 @dataclass
 class ClusterParams:
     # --- capping : on ne garde que les distances utiles ---
+    """Paramètres de filtrage des points et de regroupement des mesures proches."""
     d_min_mm: float = 80.0       # en dessous : le robot lui-même / bruit de proximité
     d_max_mm: float = 3200.0     # diagonale du terrain 2 m x 2 m = 2,83 m, plus une marge
     # --- découpage en clusters ---
@@ -34,6 +35,7 @@ class ClusterParams:
 
 @dataclass
 class Cluster:
+    """Représente un groupe de points lidar correspondant potentiellement à un objet."""
     angle_deg: float      # angle moyen (lidar, sens horaire, 0-360)
     dist_mm: float        # distance moyenne de la SURFACE vue (pas du centre de l'objet)
     n_points: int

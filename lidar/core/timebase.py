@@ -19,6 +19,7 @@ class ClockAligner:
     """
 
     def __init__(self, name: str, unit: str = "s"):
+        """Initialise l’objet et ses ressources à partir des paramètres fournis."""
         if unit not in ("s", "ns"):
             raise ValueError("unit doit valoir 's' ou 'ns'")
         self.name = name
@@ -27,6 +28,7 @@ class ClockAligner:
         self.recalibrated = False    # True si la source n'était pas en heure epoch
 
     def epoch_ns(self, t) -> int:
+        """Convertit l’horodatage source en nanosecondes depuis l’époque Unix."""
         t_ns = int(round(t * self._unit_ns))
         if self.offset_ns is None:
             off = time.time_ns() - t_ns
@@ -35,4 +37,5 @@ class ClockAligner:
         return t_ns + self.offset_ns
 
     def epoch_s(self, t) -> float:
+        """Convertit l’horodatage source en secondes depuis l’époque Unix."""
         return self.epoch_ns(t) / 1e9

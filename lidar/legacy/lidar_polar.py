@@ -41,7 +41,7 @@ from datetime import datetime
 
 import numpy as np
 
-from rplidarc1 import RPLidar
+from lidar.rplidarc1 import RPLidar
 
 
 def horodatage(t=None) -> str:
@@ -331,7 +331,7 @@ if __name__ == "__main__":
     # Logs : on coupe les messages de debug, et les alertes de la bibliothèque
     # (trames décalées...) sont comptées ("err") au lieu d'être affichées.
     logging.basicConfig(level=logging.ERROR)
-    lib_logger = logging.getLogger("rplidarc1")
+    lib_logger = logging.getLogger("lidar.rplidarc1")
     lib_logger.setLevel(logging.WARNING)
     lib_logger.addHandler(shared.errors)
     lib_logger.propagate = False

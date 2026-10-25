@@ -1,3 +1,5 @@
+"""Interface asynchrone de contrôle et d’acquisition du RPLIDAR C1."""
+
 import asyncio
 import logging
 import time
