@@ -65,16 +65,13 @@ class EkfParams:
 
 
 class StateAt(NamedTuple):
-    """Instant de l’historique contenant une pose estimée et sa covariance."""
     x: np.ndarray       # (x mm, y mm, θ rad)
     P: np.ndarray       # 3x3
     clamped: bool       # True si l'instant demandé sort de l'historique (horloges décalées ?)
 
 
 class PoseEKF:
-    """Filtre de Kalman étendu qui estime la pose du robot et propage son incertitude."""
     def __init__(self, params: Optional[EkfParams] = None):
-        """Initialise l’objet et ses ressources à partir des paramètres fournis."""
         self.p = params or EkfParams()
         self.x = np.zeros(3)
         self.P = np.eye(3)
@@ -199,6 +196,37 @@ class PoseEKF:
         dbeta = np.array([dy / r2, -dx / r2, (dy * dlx - dx * dly) / r2 - 1.0])
         H[1] = -dbeta
         return r, math.degrees(a), H
+
+
+    def correct_pole(self, pole_index: int, measured_dist_mm: float, measured_angle_deg: float,
+                     gate_chi2: float = 9.21):
+        """Corrige l'état courant avec une mesure distance/angle d'un poteau connu.
+
+        Le gating utilise le seuil du chi² à 99 % pour 2 mesures (9,21). Retourne
+        (acceptée, distance de Mahalanobis). Les angles sont exprimés dans le repère lidar
+        horaire ; l'état EKF reste en radians anti-horaires.
+        """
+        expected_dist, expected_angle_deg, H = self.measurement(self.x, pole_index)
+        innovation = np.array([
+            measured_dist_mm - expected_dist,
+            math.radians(wrap_deg(measured_angle_deg - expected_angle_deg)),
+        ], dtype=float)
+        R = np.diag([self.p.meas_dist_std_mm ** 2, math.radians(self.p.meas_angle_std_deg) ** 2])
+        S = H @ self.P @ H.T + R
+        try:
+            mahal = float(innovation.T @ np.linalg.solve(S, innovation))
+        except np.linalg.LinAlgError:
+            return False, float("inf")
+        if not math.isfinite(mahal) or mahal > gate_chi2:
+            return False, mahal
+        K = self.P @ H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ innovation
+        self.x[2] = wrap_pi(float(self.x[2]))
+        I_KH = np.eye(3) - K @ H
+        # Forme de Joseph : conserve une covariance symétrique/positive malgré les arrondis.
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+        self.P = (self.P + self.P.T) * 0.5
+        return True, mahal
 
     def predicted_std(self, P, H):
         """Écarts-types attendus d'une mesure de poteau : (σ distance mm, σ angle °),

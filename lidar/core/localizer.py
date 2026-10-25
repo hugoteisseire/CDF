@@ -33,8 +33,6 @@ class Report:
     std: tuple                 # (σx mm, σy mm, σθ °)
     proc_ms: float             # temps de traitement du tour (doit rester << 100 ms)
     clusters: list = field(default_factory=list)   # clusters du tour (diagnostic : où le lidar voit des objets)
-    timings_ms: dict = field(default_factory=dict) # profil détaillé de ce tour
-    odo_hz: float = 0.0                            # fréquence récente des nouvelles poses d’odométrie
 
 
 class Localizer:
@@ -65,13 +63,6 @@ class Localizer:
         self.revs_processed = 0
         self.revs_skipped = 0      # tours arrivés avant le premier échantillon d'odométrie
         self.error = None
-        self._odo_updates = 0
-        self._odo_last_update_perf = None
-        self._odo_intervals = []
-        self._odo_hz = 0.0
-        self._last_report_perf = None
-        self._report_intervals = []
-        self._report_hz = 0.0
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True, name="localizer")
@@ -98,19 +89,10 @@ class Localizer:
             self.error = e
 
     def _poll_odometry(self):
-        t_call = time.perf_counter()
         x, y, th, t = self._pose_source()
         if t is None or t == self._last_odo_t:
             return
         self._last_odo_t = t
-        if self._odo_last_update_perf is not None:
-            interval = t_call - self._odo_last_update_perf
-            if interval > 0:
-                self._odo_intervals.append(interval)
-                self._odo_intervals = self._odo_intervals[-30:]
-                self._odo_hz = len(self._odo_intervals) / sum(self._odo_intervals)
-        self._odo_last_update_perf = t_call
-        self._odo_updates += 1
         # t est l'instant de lecture des moteurs (horloge de l'odométrie) ; on le ramène à l'heure système
         # pour qu'il soit comparable aux horodatages du lidar.
         ts = self.odo_clock.epoch_s(t)
@@ -120,8 +102,12 @@ class Localizer:
                 # (repère terrain). Ensuite il n'utilise plus que les déplacements de l'odométrie.
                 self.ekf.reset(*self._init_pose, ts)
             self.ekf.predict_odometry(x, y, th, ts)
-            if self._on_pose is not None:
-                self._on_pose(ts, self.ekf.pose)
+            pose = self.ekf.pose
+
+        # Callback après chaque nouvel échantillon d’odométrie accepté.
+        # Il est hors du verrou pour ne pas bloquer les lectures concurrentes de l’état EKF.
+        if self._on_pose is not None:
+            self._on_pose(ts, pose)
 
     def _process_revs(self):
         while True:
@@ -134,31 +120,32 @@ class Localizer:
                 self.revs_skipped += 1
                 continue
             t0 = time.perf_counter()
-            t_part = time.perf_counter()
             capped = cap_points(rev.points, self._cp)
-            cap_ms = (time.perf_counter() - t_part) * 1000.0
-            t_part = time.perf_counter()
             clusters = find_clusters(capped, self._cp)
-            cluster_ms = (time.perf_counter() - t_part) * 1000.0
             # Milieu du tour (secondes) : sert seulement d'instant de référence pour afficher la mesure attendue
             # des poteaux sans candidat. Les clusters, eux, sont datés point par point.
             t_ref = (rev.t_start_ns + rev.t_end_ns) / 2e9
-            t_part = time.perf_counter()
             res = associate_poles(self.ekf, clusters, t_ref, self._assoc)
-            assoc_ms = (time.perf_counter() - t_part) * 1000.0
-            total_ms = (time.perf_counter() - t0) * 1000.0
-            now_perf = time.perf_counter()
-            if self._last_report_perf is not None:
-                interval = now_perf - self._last_report_perf
-                if interval > 0:
-                    self._report_intervals.append(interval)
-                    self._report_intervals = self._report_intervals[-30:]
-                    self._report_hz = len(self._report_intervals) / sum(self._report_intervals)
-            self._last_report_perf = now_perf
+            # Étape 4 : correction séquentielle. Chaque mesure validée par l'association est
+            # également soumise au gating statistique (chi² 99 %, 2 ddl) avant de corriger l'EKF.
+            # La distance mesurée est ramenée au centre du poteau (le lidar voit sa surface).
+            accepted = rejected = 0
+            for match in res.matches:
+                if match.status != "matched" or match.cluster is None:
+                    continue
+                ok, _ = self.ekf.correct_pole(
+                    match.pole,
+                    match.cluster.dist_mm + self.ekf.p.pole_radius_mm,
+                    match.cluster.angle_deg,
+                )
+                if ok:
+                    accepted += 1
+                else:
+                    rejected += 1
             report = Report(rev.number, t_ref, len(rev.points), len(capped), len(clusters), res,
-                            self.ekf.pose, self.ekf.std, total_ms, clusters,
-                            {"cap_points": cap_ms, "find_clusters": cluster_ms,
-                             "associate_poles": assoc_ms, "total": total_ms}, self._odo_hz)
+                            self.ekf.pose, self.ekf.std, (time.perf_counter() - t0) * 1e3, clusters)
+            report.corrections_accepted = accepted
+            report.corrections_rejected = rejected
             self.revs_processed += 1
             if self._on_report is not None:
                 self._on_report(report)
