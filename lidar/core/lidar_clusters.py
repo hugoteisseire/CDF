@@ -29,7 +29,7 @@ class ClusterParams:
     d_max_mm: float = 3200.0     # diagonale du terrain 2 m x 2 m = 2,83 m, plus une marge
     # --- découpage en clusters ---
     max_angle_gap_deg: float = 2.2    # trou d'angle toléré dans un cluster (~3 pas du lidar de 0,72°)
-    max_dist_jump_mm: float = 150.0   # saut de distance toléré entre points voisins avant de séparer 2 objets
+    max_dist_jump_mm: float = 100.0   # saut de distance entre deux points voisins qui sépare 2 objets
     min_points: int = 2               # moins de points : bruit, pas un objet
 
 
@@ -51,48 +51,6 @@ def cap_points(points: np.ndarray, cp: ClusterParams = None) -> np.ndarray:
     """Capping : retire les points trop proches ou trop loin pour être utiles."""
     cp = cp or ClusterParams()
     keep = (points["dist"] >= cp.d_min_mm) & (points["dist"] <= cp.d_max_mm)
-    return points[keep]
-
-
-def filter_points_in_field(
-    points: np.ndarray,
-    state_at,
-    field_size_mm=(3000.0, 2000.0),
-    margin_mm: float = 200.0,
-    lidar_offset_mm=(0.0, 0.0),
-    lidar_zero_deg: float = 0.0,
-) -> np.ndarray:
-    """Retire les mesures dont le point d'impact est hors du terrain + marge.
-
-    Chaque mesure est projetée dans le repère terrain avec la pose EKF interpolée à son
-    horodatage. Les angles du lidar sont horaires ; ceux du repère terrain sont anti-horaires.
-    state_at(t_s) doit renvoyer un état ayant un attribut .x = (x_mm, y_mm, theta_rad),
-    ou None si aucun état n'est disponible.
-    """
-    if len(points) == 0:
-        return points
-
-    field_x_mm, field_y_mm = field_size_mm
-    xmin, xmax = -margin_mm, field_x_mm + margin_mm
-    ymin, ymax = -margin_mm, field_y_mm + margin_mm
-    ox, oy = lidar_offset_mm
-    keep = np.ones(len(points), dtype=bool)
-
-    for i, point in enumerate(points):
-        state = state_at(float(point["t_ns"]) / 1e9)
-        if state is None:
-            # Pas de pose exploitable : ne pas supprimer arbitrairement la mesure.
-            continue
-        x, y, theta = state.x
-        c, s = math.cos(theta), math.sin(theta)
-        lidar_x = x + c * ox - s * oy
-        lidar_y = y + s * ox + c * oy
-
-        angle = theta + math.radians(lidar_zero_deg - float(point["angle"]))
-        hit_x = lidar_x + float(point["dist"]) * math.cos(angle)
-        hit_y = lidar_y + float(point["dist"]) * math.sin(angle)
-        keep[i] = xmin <= hit_x <= xmax and ymin <= hit_y <= ymax
-
     return points[keep]
 
 
