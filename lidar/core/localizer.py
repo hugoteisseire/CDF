@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .ekf import EkfParams, PoseEKF
-from .lidar_clusters import ClusterParams, cap_points, filter_points_in_field, find_clusters
+from .lidar_clusters import ClusterParams, cap_points, find_clusters
 from .pole_association import AssocParams, AssocResult, associate_poles
 from .timebase import ClockAligner
 
@@ -121,18 +121,7 @@ class Localizer:
                 continue
             t0 = time.perf_counter()
             capped = cap_points(rev.points, self._cp)
-            # Filtrage géométrique dans le repère terrain : les points d'impact hors du terrain
-            # élargi de 200 mm ne participent ni au clustering ni à l'association, et ne peuvent
-            # donc pas apparaître dans les clusters transmis à la visualisation.
-            in_field = filter_points_in_field(
-                capped,
-                self.ekf.state_at,
-                field_size_mm=self.ekf.p.field_size_mm,
-                margin_mm=self.ekf.p.field_margin_mm,
-                lidar_offset_mm=self.ekf.p.lidar_offset_mm,
-                lidar_zero_deg=self.ekf.p.lidar_zero_deg,
-            )
-            clusters = find_clusters(in_field, self._cp)
+            clusters = find_clusters(capped, self._cp)
             # Milieu du tour (secondes) : sert seulement d'instant de référence pour afficher la mesure attendue
             # des poteaux sans candidat. Les clusters, eux, sont datés point par point.
             t_ref = (rev.t_start_ns + rev.t_end_ns) / 2e9
