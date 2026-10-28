@@ -55,6 +55,7 @@ def _filter_points_in_field(points, ekf: PoseEKF):
         state = ekf.state_at(t_s)
         if state is None or state.clamped:
             unverified += 1
+            keep.append(False)
             continue
 
         x, y, theta = state.x
