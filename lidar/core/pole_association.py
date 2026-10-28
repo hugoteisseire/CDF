@@ -30,7 +30,7 @@ class AssocParams:
     # rattrape une pose moins précise (angle de montage, latence, dérive), mais laisse entrer plus de clusters :
     # un poteau est sauté ("ambigu") dès que deux clusters de sa taille sont dans la fenêtre.
     # La correction de pose reste protégée par le gating du chi² (PoseEKF.correct_pole), indépendant de ceci.
-    window_scale: float = 2.0
+    window_scale: float = 2.5
     # Taille d'un cluster compatible avec un poteau de 100 mm
     width_min_mm: float = 15.0
     width_max_mm: float = 150.0
