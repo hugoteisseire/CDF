@@ -26,15 +26,17 @@ from .relocalize import RelocParams, triangulate
 from .timebase import ClockAligner
 
 def _filter_points_in_field(points, ekf: PoseEKF):
-    """Filtre les points lidar dont l'impact estimé est hors terrain + marge.
+    """Filtre les impacts hors terrain et retourne aussi leurs coordonnées terrain.
 
-    Chaque point est projeté avec la pose EKF interpolée à son horodatage.
-    Les angles lidar sont horaires ; le repère terrain est anti-horaire.
-    Si la pose est absente ou trop éloignée de l'historique, le point est conservé
-    pour éviter un rejet basé sur une pose temporellement peu fiable.
+    Chaque impact est projeté avec la pose EKF interpolée à son horodatage (corrigé
+    du retard configuré du lidar). Les points dont l'horodatage ne peut pas être
+    associé à l'historique EKF sont rejetés : les conserver rendrait le filtre
+    inefficace et produirait un nuage incohérent.
     """
+    import numpy as np
+
     if len(points) == 0:
-        return points
+        return points, np.empty((0, 2), dtype=float), 0
 
     p = ekf.p
     xmin, ymin, xmax, ymax = p.field_mm
@@ -44,27 +46,33 @@ def _filter_points_in_field(points, ekf: PoseEKF):
     xmax += margin
     ymax += margin
     ox, oy = p.lidar_offset_mm
-    keep = [True] * len(points)
+    keep = []
+    world_xy = []
+    unverified = 0
 
-    for i, point in enumerate(points):
-        state = ekf.state_at(float(point["t_ns"]) / 1e9)
+    for point in points:
+        t_s = float(point["t_ns"]) / 1e9 - p.lidar_latency_s
+        state = ekf.state_at(t_s)
         if state is None or state.clamped:
+            unverified += 1
             continue
 
         x, y, theta = state.x
         c, s = math.cos(float(theta)), math.sin(float(theta))
         lidar_x = float(x) + c * ox - s * oy
         lidar_y = float(y) + s * ox + c * oy
-
-        # Cohérent avec PoseEKF.measurement(): angle lidar horaire, zéro réglable.
         world_angle = float(theta) + math.radians(p.lidar_zero_deg - float(point["angle"]))
         distance = float(point["dist"])
         hit_x = lidar_x + distance * math.cos(world_angle)
         hit_y = lidar_y + distance * math.sin(world_angle)
-        keep[i] = xmin <= hit_x <= xmax and ymin <= hit_y <= ymax
 
-    return points[keep]
+        if xmin <= hit_x <= xmax and ymin <= hit_y <= ymax:
+            keep.append(True)
+            world_xy.append((hit_x, hit_y))
+        else:
+            keep.append(False)
 
+    return points[keep], np.asarray(world_xy, dtype=float).reshape((-1, 2)), unverified
 
 LOG_COLUMNS = ("t_s", "rev", "x_mm", "y_mm", "theta_deg", "sigma_x_mm", "sigma_y_mm", "sigma_theta_deg",
                "n_clusters", "n_matched", "corr_accepted", "corr_rejected", "mahal_mean",
@@ -92,6 +100,8 @@ class Report:
     odo_hz: float = 0.0                            # cadence réelle de l'odométrie vue par le filtre
     timings_ms: dict = field(default_factory=dict)  # cap_points, find_clusters, associate_poles, correct, relocalize, total
     points: object = None  # Points lidar conservés après filtrage géométrique
+    points_world_mm: object = None  # Impacts filtrés déjà projetés dans le repère terrain
+    points_unverified: int = 0  # Points rejetés faute d'un état EKF fiable à leur horodatage
 
 
 class Localizer:
@@ -255,7 +265,7 @@ class Localizer:
         t1 = time.perf_counter()
         # Les impacts hors du terrain élargi de 200 mm sont retirés avant le clustering.
         # Les clusters transmis au rapport/visualiseur ne contiennent donc pas ces points.
-        in_field = _filter_points_in_field(capped, self.ekf)
+        in_field, points_world_mm, points_unverified = _filter_points_in_field(capped, self.ekf)
         t_geom = time.perf_counter()
         clusters = find_clusters(in_field, self._cp)
         t2 = time.perf_counter()
@@ -317,6 +327,7 @@ class Localizer:
         report = Report(
             rev.number, t_ref, len(rev.points), len(capped), len(clusters), res, pose, std,
             (t5 - t0) * 1e3, clusters, points=in_field,
+            points_world_mm=points_world_mm, points_unverified=points_unverified,
             corrections_accepted=accepted, corrections_rejected=rejected, mahal=mahals,
             lost=lost, relocalized=relocalized,
             reliable=(not lost) and math.hypot(std[0], std[1]) < p.safe_std_mm,

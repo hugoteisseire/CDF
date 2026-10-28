@@ -360,17 +360,13 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
             ox_l, oy_l = lidar_offset_mm
             lidar_xy = (x + ox_l * math.cos(theta) - oy_l * math.sin(theta),
                         y + ox_l * math.sin(theta) + oy_l * math.cos(theta))
-            # Nuage de points brut du dernier tour (touche P). Angle lidar horaire -> terrain : theta + zero - angle.
-            # La pose est celle de fin de traitement du tour : robot en mouvement, le nuage est légèrement déformé.
-            if show_points and latest.points is not None:
-                ang_deg, dist_mm = points_angle_dist(latest.points)
-                if len(ang_deg):
-                    a_t = theta + np.deg2rad(lidar_zero_deg - ang_deg)
-                    sx_pts = (ox + (lidar_xy[0] + dist_mm * np.cos(a_t)) * scale).astype(int)
-                    sy_pts = (oy - (lidar_xy[1] + dist_mm * np.sin(a_t)) * scale).astype(int)
-                    for u, v in zip(sx_pts.tolist(), sy_pts.tolist()):
-                        if 0 <= u < width and 0 <= v < height:
-                            pygame.draw.circle(screen, (70, 120, 200), (u, v), 2)
+            # Nuage filtré : on dessine les impacts projetés au même instant que le filtre,
+            # pas en réutilisant la pose courante (ce qui déformait le nuage en mouvement).
+            if show_points and latest.points_world_mm is not None:
+                for hit_x, hit_y in latest.points_world_mm:
+                    u, v = xy((float(hit_x), float(hit_y)))
+                    if 0 <= u < width and 0 <= v < height:
+                        pygame.draw.circle(screen, (70, 120, 200), (u, v), 2)
             # Corps du robot et direction avant (theta est anti-horaire dans le repère terrain).
             rp = xy(robot_xy)
             pygame.draw.circle(screen, (55, 65, 75), rp, max(8, int(106.5 * scale)), 2)
@@ -425,6 +421,10 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
                 yy += 21
             screen.blit(small.render(f"[P] nuage de points lidar : {'ON' if show_points else 'OFF'}", True,
                                      (45, 50, 58)), (16, yy + 4))
+            screen.blit(small.render(
+                f"Points filtrés: {len(latest.points_world_mm) if latest.points_world_mm is not None else 0} | "
+                f"horodatage non fiable: {latest.points_unverified}", True, (45, 50, 58)),
+                (16, yy + 24))
             statuses = "   ".join(f"P{m.pole + 1}: {TAGS.get(m.status, m.status)}" for m in latest.result.matches)
             screen.blit(font.render(statuses, True, (45, 50, 58)), (15, height - 28))
         else:
