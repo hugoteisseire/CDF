@@ -25,6 +25,12 @@ class AssocParams:
     win_angle_max_deg: float = 15.0
     win_dist_min_mm: float = 50.0
     win_dist_max_mm: float = 400.0
+    # Coefficient appliqué à la fenêtre FINALE (plancher et plafond compris) : 3 = fenêtres 3 fois plus larges
+    # que le plan (±3 sigma, ±1,5° ... ±15°, ±50 ... ±400 mm). 1 = comportement d'origine. Une fenêtre plus large
+    # rattrape une pose moins précise (angle de montage, latence, dérive), mais laisse entrer plus de clusters :
+    # un poteau est sauté ("ambigu") dès que deux clusters de sa taille sont dans la fenêtre.
+    # La correction de pose reste protégée par le gating du chi² (PoseEKF.correct_pole), indépendant de ceci.
+    window_scale: float = 2.0
     # Taille d'un cluster compatible avec un poteau de 100 mm
     width_min_mm: float = 15.0
     width_max_mm: float = 150.0
@@ -62,8 +68,8 @@ def _clip(v, lo, hi):
 
 def _windows(ekf: PoseEKF, P, H, ap: AssocParams):
     sd, sa = ekf.predicted_std(P, H)
-    return (_clip(ap.n_sigma * sd, ap.win_dist_min_mm, ap.win_dist_max_mm),
-            _clip(ap.n_sigma * sa, ap.win_angle_min_deg, ap.win_angle_max_deg))
+    return (ap.window_scale * _clip(ap.n_sigma * sd, ap.win_dist_min_mm, ap.win_dist_max_mm),
+            ap.window_scale * _clip(ap.n_sigma * sa, ap.win_angle_min_deg, ap.win_angle_max_deg))
 
 
 def associate_poles(ekf: PoseEKF, clusters: List[Cluster], t_ref_s: float,

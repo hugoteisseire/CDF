@@ -325,7 +325,7 @@ class Response:
                 f"calculated angle {angle} from {response}. Angles should not be >360 so this result will be ignored."
             )
             return None
-        distance = (response[3] | (response[4] << 8)) / 4
+        distance = ((response[3] | (response[4] << 8)) / 4)-50
         return quality, angle, distance
 
     @staticmethod

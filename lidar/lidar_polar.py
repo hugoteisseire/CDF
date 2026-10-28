@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-from rplidarc1 import RPLidar
+from rplidarc1.rplidarc1 import RPLidar
 
 
 # --------------------------------------------------------------------------- #

@@ -45,6 +45,11 @@ class _ErrorCounter(logging.Handler):
 
     def emit(self, record):
         """Enregistre un événement de diagnostic dans le journal."""
+        # La bibliothèque émet « In waiting: N » en WARNING à chaque démarrage de scan : c'est une information, pas
+        # une erreur. Sans ce filtre, lib_errors vaut au moins 1 dès le départ et le critère « aucune erreur » de
+        # l'étape 0 ne peut jamais être tenu.
+        if record.getMessage().startswith("In waiting"):
+            return
         self.count += 1
 
 
@@ -72,7 +77,7 @@ def _import_rplidar():
 class LidarAcquisition:
     """Acquiert les mesures du lidar en arrière-plan et publie uniquement des tours complets."""
     def __init__(self, port="/dev/ttyUSB0", baud=460800, queue_size=20,
-                 min_raw_points=300, max_first_angle_deg=10.0, min_last_angle_deg=350.0):
+                 min_raw_points=300, max_first_angle_deg=10.0, min_last_angle_deg=350.0, lidar_factory=None):
         """Initialise l’objet et ses ressources à partir des paramètres fournis."""
         self.port, self.baud = port, baud
         self.rev_queue = queue.Queue(maxsize=queue_size)
@@ -80,6 +85,8 @@ class LidarAcquisition:
         self._min_raw = min_raw_points
         self._max_first = max_first_angle_deg
         self._min_last = min_last_angle_deg
+        self._factory = lidar_factory      # (port, baud) -> objet de type RPLidar ; None = la vraie bibliothèque
+        self._max_gap_ns = 0               # plus long silence entre deux points reçus depuis le dernier relevé
         # compteurs cumulés (critères de l'étape 0)
         self.revs_seen = 0         # tours vus (hors tour de démarrage)
         self.revs_published = 0    # ... publiés dans rev_queue
@@ -103,13 +110,17 @@ class LidarAcquisition:
     # ------------------------------------------------------------------ cycle de vie
     def start(self):
         """Démarre le traitement ou le thread associé à cet objet."""
-        RPLidar = _import_rplidar()          # import ici : la bibliothèque n'est requise que pour acquérir
-
-        self._lidar = RPLidar(self.port, self.baud)       # ouvre le port série + test de santé
+        if self._factory is not None:
+            self._lidar = self._factory(self.port, self.baud)
+            lib_module = type(self._lidar).__module__
+        else:
+            RPLidar = _import_rplidar()      # import ici : la bibliothèque n'est requise que pour acquérir
+            self._lidar = RPLidar(self.port, self.baud)   # ouvre le port série + test de santé
+            lib_module = RPLidar.__module__
         # Le compteur d'erreurs doit être accroché au logger du PACKAGE de la bibliothèque, dont le nom dépend
         # de l'endroit où elle est rangée : "rplidarc1" ou "lidar.rplidarc1" (déduit du nom du module de la
         # classe : "lidar.rplidarc1.scanner" -> "lidar.rplidarc1"). Les loggers fils (…protocol) remontent jusque-là.
-        self._lib_logger_name = RPLidar.__module__.rsplit(".", 1)[0]
+        self._lib_logger_name = lib_module.rsplit(".", 1)[0]
         lib_logger = logging.getLogger(self._lib_logger_name)
         lib_logger.setLevel(logging.WARNING)
         lib_logger.addHandler(self._errors)
@@ -146,6 +157,14 @@ class LidarAcquisition:
         return (self._thread is not None and self._thread.is_alive()
                 and self._seg_thread is not None and self._seg_thread.is_alive())
 
+    def take_max_gap_ms(self) -> float:
+        """Plus long silence entre deux points reçus depuis le dernier appel (puis remis à zéro).
+
+        La bibliothèque vide le port par rafales toutes les ~10 ms : ~10 à 15 ms est normal. Beaucoup plus
+        (dizaines de ms) = le lecteur n'a pas eu la main, donc des octets ont attendu (voire été perdus)."""
+        gap, self._max_gap_ns = self._max_gap_ns, 0
+        return gap / 1e6
+
     def snapshot(self) -> dict:
         """Compteurs cumulés + cadence mesurée depuis le dernier appel (tours/s et points/s)."""
         now = time.perf_counter()
@@ -166,6 +185,7 @@ class LidarAcquisition:
             "revs_rejected": self.revs_rejected,
             "revs_dropped": self.revs_dropped,
             "lib_errors": self._errors.count,
+            "max_gap_ms": self.take_max_gap_ms(),
         }
 
     # ------------------------------------------------------------------ thread de lecture
@@ -211,6 +231,7 @@ class LidarAcquisition:
         first_a = last_a = None
         t_first = t_last = 0
         prev_angle = None
+        prev_t = None
         synced = False                         # False tant qu'on n'a pas vu le premier passage 360° -> 0°
 
         while True:
@@ -223,6 +244,9 @@ class LidarAcquisition:
                 p = raw.popleft()
                 a, d = p["a_deg"], p["d_mm"]
                 t = self.clock.epoch_ns(p["t_rx_ns"])
+                if prev_t is not None and t - prev_t > self._max_gap_ns:
+                    self._max_gap_ns = t - prev_t
+                prev_t = t
                 self.points += 1
                 # Nouveau tour = l'angle retombe de ~360° à ~0° (par ex. 359,6° -> 0,3° : écart de 359 > 180).
                 # Un petit recul dû au bruit (359,6° -> 359,3°) ne déclenche rien.

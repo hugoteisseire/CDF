@@ -1,12 +1,20 @@
-"""Fusion de capteurs sur le robot, étapes 0 à 3 du plan : acquisition lidar, prédiction de l'EKF par
-l'odométrie, association des poteaux. Aucune correction de pose pour l'instant (étape 4).
+"""Fusion de capteurs sur le robot : acquisition lidar (étape 0), prédiction de l'EKF par l'odométrie
+(étape 2), association des poteaux (étape 3), correction de la pose à l'instant de chaque cluster avec gating
+(étape 4), détection de perte et relocalisation par triangulation (étape 6), journal CSV (étape 7).
 
     python -m tests.test_fusion --x0 1000 --y0 1000 --theta0-deg 0
     python -m tests.test_fusion --x0 1000 --y0 1000 --theta0-deg 0 --drive   # + aller-retour de test_odometry
+    python -m tests.test_fusion --x0 1000 --y0 1000 --theta0-deg 0 --log fusion.csv   # journal pour analyse
 
 (x0, y0, theta0) = pose du robot sur le terrain au démarrage, repère du plan : origine sur le poteau
 (0, 0), poteaux en (2000, 0) et (0, 2000), θ en sens anti-horaire, 0 = axe x du terrain.
 Le dossier rplidarc1/ (avec t_rx_ns) doit être importable depuis la racine du dépôt.
+
+L'acquisition lidar tourne dans son PROPRE PROCESSUS (core/lidar_process.py) : dans le même processus que l'affichage,
+le filtre et l'odométrie, la lecture série était affamée (GIL) et le lidar n'atteignait plus 10 tours/s. Dans la ligne
+« lidar : » affichée chaque seconde, « trou max » est le plus long silence entre deux points reçus : ~10 à 15 ms est
+normal, des dizaines de ms ou plus signalent un lecteur qui n'a pas eu la main. --lidar-inline remet l'ancien mode
+(même processus), utile seulement pour comparer.
 
 Ce que le test affiche, dans l'ordre du plan :
   - étape 0 : une ligne par seconde (tours/s, points/s, tours rejetés, erreurs de la lib) ;
@@ -23,6 +31,7 @@ import numpy as np
 
 from lidar.core.ekf import EkfParams
 from lidar.core.lidar_acquisition import LidarAcquisition
+from lidar.core.lidar_process import LidarProcess
 from lidar.core.localizer import Localizer
 from lidar.core.pole_association import AssocParams
 
@@ -184,11 +193,33 @@ def format_report(r, ap=None, debug=False) -> str:
         seen = [f"{c.dist_mm + 50:4.0f}mm/{c.angle_deg:5.1f}deg(l={c.width_mm:3.0f})" for c in r.clusters
                 if c.n_points >= ap.min_points and ap.width_min_mm <= c.width_mm <= ap.width_max_mm]
         extra = "\n      clusters taille poteau : " + (" ".join(seen) if seen else "aucun")
+    mahal = f" ecart_norm {sum(r.mahal) / len(r.mahal):4.1f}" if r.mahal else ""
+    state = " | RELOCALISE" if r.relocalized else (" | PERDU" if r.lost else (" | pose peu fiable" if not r.reliable else ""))
     return (f"[{time.strftime('%H:%M:%S', time.localtime(r.t_s))}] tour {r.rev_number:5d} | "
             f"{r.n_clusters:2d} clusters ({r.result.n_size_ok} taille poteau) | " + " | ".join(parts) +
+            f" | corr {r.corrections_accepted} ok/{r.corrections_rejected} refusees{mahal}"
             f" | pose ({x:6.0f},{y:6.0f},{math.degrees(th):6.1f}deg) sigma ({sx:3.0f}mm,{sy:3.0f}mm,{st:4.1f}deg)"
-            f" | {r.proc_ms:4.1f} ms" + (f" | HORS HISTORIQUE x{r.result.n_clamped}" if r.result.n_clamped else "") + extra)
+            f" | {r.proc_ms:4.1f} ms" + (f" | HORS HISTORIQUE x{r.result.n_clamped}" if r.result.n_clamped else "")
+            + state + extra)
 
+
+
+def points_angle_dist(pts):
+    """(angle_deg, dist_mm) d'un tour brut (rev.points).
+
+    POINT_DTYPE est construit à partir de tuples (angle, distance, qualité, temps) dans lidar_acquisition : les
+    deux premiers champs sont donc l'angle lidar (deg, sens horaire) et la distance (mm), quels que soient leurs noms.
+    Un tableau 2D simple (N, >=2) est aussi accepté.
+    """
+    if pts is None or len(pts) == 0:
+        return np.empty(0), np.empty(0)
+    if pts.dtype.names:
+        ang = pts[pts.dtype.names[0]].astype(float)
+        dist = pts[pts.dtype.names[1]].astype(float)
+    else:
+        ang, dist = pts[:, 0].astype(float), pts[:, 1].astype(float)
+    ok = dist > 0
+    return ang[ok], dist[ok]
 
 
 def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=(0.0, 0.0),
@@ -228,6 +259,7 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
         pygame.draw.line(screen, color, xy(p1), xy(p2), thickness)
 
     latest = None
+    show_points = True      # touche P : affiche / masque le nuage de points brut du lidar
     running = True
     # Profilage léger : moyennes/maxima sur une fenêtre glissante d'environ 1 s.
     profile_names = ("events", "teleop", "queue", "draw", "flip", "frame")
@@ -254,6 +286,8 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
+                elif event.key == pygame.K_p:
+                    show_points = not show_points
                 elif driver is not None and event.key == pygame.K_SPACE:
                     space_pressed = True
                 elif driver is not None and event.key == pygame.K_UP:
@@ -326,6 +360,17 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
             ox_l, oy_l = lidar_offset_mm
             lidar_xy = (x + ox_l * math.cos(theta) - oy_l * math.sin(theta),
                         y + ox_l * math.sin(theta) + oy_l * math.cos(theta))
+            # Nuage de points brut du dernier tour (touche P). Angle lidar horaire -> terrain : theta + zero - angle.
+            # La pose est celle de fin de traitement du tour : robot en mouvement, le nuage est légèrement déformé.
+            if show_points and latest.points is not None:
+                ang_deg, dist_mm = points_angle_dist(latest.points)
+                if len(ang_deg):
+                    a_t = theta + np.deg2rad(lidar_zero_deg - ang_deg)
+                    sx_pts = (ox + (lidar_xy[0] + dist_mm * np.cos(a_t)) * scale).astype(int)
+                    sy_pts = (oy - (lidar_xy[1] + dist_mm * np.sin(a_t)) * scale).astype(int)
+                    for u, v in zip(sx_pts.tolist(), sy_pts.tolist()):
+                        if 0 <= u < width and 0 <= v < height:
+                            pygame.draw.circle(screen, (70, 120, 200), (u, v), 2)
             # Corps du robot et direction avant (theta est anti-horaire dans le repère terrain).
             rp = xy(robot_xy)
             pygame.draw.circle(screen, (55, 65, 75), rp, max(8, int(106.5 * scale)), 2)
@@ -378,6 +423,8 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
                 pygame.draw.line(screen, color, (16, yy + 7), (42, yy + 7), 3)
                 screen.blit(small.render(label, True, (45, 50, 58)), (50, yy))
                 yy += 21
+            screen.blit(small.render(f"[P] nuage de points lidar : {'ON' if show_points else 'OFF'}", True,
+                                     (45, 50, 58)), (16, yy + 4))
             statuses = "   ".join(f"P{m.pole + 1}: {TAGS.get(m.status, m.status)}" for m in latest.result.matches)
             screen.blit(font.render(statuses, True, (45, 50, 58)), (15, height - 28))
         else:
@@ -414,17 +461,20 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
             "Calcul par tour (ms): cap / clusters / association / total",
             (f"{latest.timings_ms['cap_points']:.2f} / {latest.timings_ms['find_clusters']:.2f} / "
              f"{latest.timings_ms['associate_poles']:.2f} / {latest.timings_ms['total']:.2f}") if latest is not None else "--",
+            (f"corrections: {latest.corrections_accepted} ok / {latest.corrections_rejected} refusées | "
+             + ("RELOCALISÉ" if latest.relocalized else "PERDU" if latest.lost
+                else "pose fiable" if latest.reliable else "pose peu fiable")) if latest is not None else "--",
             "temps UI en ms : moyenne / max (~1 s)",
         ]
         for name in ("events", "teleop", "queue", "draw", "flip", "frame"):
             avg_ms, max_ms = displayed_profile[name]
             panel_lines.append(f"{name:>6}: {avg_ms:6.2f} / {max_ms:6.2f}")
         panel_lines.append("tick(30) attend pour limiter les FPS; non inclus dans draw")
-        panel = pygame.Surface((430, 220), pygame.SRCALPHA)
+        panel = pygame.Surface((430, 262), pygame.SRCALPHA)
         panel.fill((255, 255, 255, 225))
         for i, text_line in enumerate(panel_lines):
             panel.blit(small.render(text_line, True, (20, 25, 32)), (8, 5 + i * 19))
-        screen.blit(panel, (width - 440, 8))
+        screen.blit(panel, (0, 500))
 
         t0 = time.perf_counter()
         pygame.display.flip()
@@ -451,16 +501,35 @@ def main():
                     help="sans moteurs ni CAN : lidar + EKF immobile. Sert à savoir si les moteurs perturbent le lidar")
     ap.add_argument("--min-points", type=int, default=300,
                     help="points minimum par tour pour le publier (un C1 à 10 Hz en donne ~500)")
+    ap.add_argument("--lidar-inline", action="store_true",
+                    help="lecture du lidar dans CE processus (ancien mode, sensible à la charge) : pour comparer seulement")
+    ap.add_argument("--lidar-cpu", type=int, default=None, metavar="N",
+                    help="épingle le processus lidar sur le coeur N (ex. 3 sur un Raspberry Pi 4) ; sans effet avec --lidar-inline")
     ap.add_argument("--init-std-mm", type=float, default=100.0,
                     help="incertitude de départ sur x et y (écart-type, mm). Plus elle est grande, plus la fenêtre de "
                          "recherche des poteaux est large (3 sigma, bornée par --win-dist-max-mm)")
     ap.add_argument("--init-std-deg", type=float, default=5.0, help="incertitude de départ sur le cap (écart-type, deg)")
     ap.add_argument("--win-dist-max-mm", type=float, default=600.0, help="demi-fenêtre maximale en distance (mm)")
     ap.add_argument("--win-angle-max-deg", type=float, default=25.0, help="demi-fenêtre maximale en angle (deg)")
+    ap.add_argument("--win-scale", type=float, default=AssocParams().window_scale,
+                    help="coefficient appliqué à la fenêtre de recherche des poteaux, maxima compris (défaut 3 ; 1 = plan "
+                         "d'origine). Plus large : rattrape un filtre trop sûr de lui, mais plus de poteaux ambigus")
     ap.add_argument("--lidar-zero-deg", type=float, default=0.0,
                     help="angle lu par le lidar quand il vise l'axe x du robot (à mesurer ; une erreur ici décale tous les poteaux)")
+    ap.add_argument("--lidar-offset-x", type=float, default=0.0,
+                    help="position du lidar dans le repère robot, x (mm), vers la roue 3 ; à mesurer depuis l'axe de rotation. "
+                         "Une erreur ici est invisible à l'arrêt mais fait refuser les corrections dès que le robot tourne")
+    ap.add_argument("--lidar-offset-y", type=float, default=0.0, help="idem, y (mm), à 90° de x (anti-horaire)")
+    ap.add_argument("--lidar-latency-s", type=float, default=0.0,
+                    help="retard (s) entre la mesure d'un point et son horodatage de réception (essayer 0.01 à 0.03) ; "
+                         "une erreur décale le cap estimé de (vitesse de rotation x erreur) pendant les rotations")
+    ap.add_argument("--no-reloc", action="store_true",
+                    help="désactive la détection de perte / relocalisation par triangulation (test : l'odométrie est fiable, "
+                         "on vérifie que la divergence ne vient pas d'une relocalisation fausse)")
     ap.add_argument("--debug", action="store_true", help="affiche aussi les clusters de la taille d'un poteau vus par le lidar")
     ap.add_argument("--visualize", action="store_true", help="ouvre une fenêtre pygame de visualisation en direct")
+    ap.add_argument("--log", default=None, metavar="FICHIER.csv",
+                    help="journal CSV : une ligne par tour (pose, incertitude, corrections, écart normalisé, perte)")
     ap.add_argument("--pose-only", action="store_true",
                     help="écrit uniquement timestamp,x,y,theta à chaque nouvelle pose d’odométrie (sans graphique ni logs)")
     args = ap.parse_args()
@@ -475,11 +544,18 @@ def main():
     else:
         bus, notifier, group, base = build_base()
         pose_source = base.pose
-    acq = LidarAcquisition(args.port, min_raw_points=args.min_points)
+    if args.lidar_inline:
+        acq = LidarAcquisition(args.port, min_raw_points=args.min_points)
+    else:
+        acq = LidarProcess(args.port, min_raw_points=args.min_points, cpu=args.lidar_cpu)
     loc = None
     ekf_params = EkfParams(init_pos_std_mm=args.init_std_mm, init_theta_std_deg=args.init_std_deg,
-                           lidar_zero_deg=args.lidar_zero_deg)
-    assoc = AssocParams(win_dist_max_mm=args.win_dist_max_mm, win_angle_max_deg=args.win_angle_max_deg)
+                           lidar_zero_deg=args.lidar_zero_deg,
+                           lidar_offset_mm=(args.lidar_offset_x, args.lidar_offset_y),
+                           lidar_latency_s=args.lidar_latency_s,
+                           **({"lost_after_s": 1e9} if args.no_reloc else {}))
+    assoc = AssocParams(win_dist_max_mm=args.win_dist_max_mm, win_angle_max_deg=args.win_angle_max_deg,
+                        window_scale=args.win_scale)
 
     visual_queue = queue.Queue(maxsize=1) if args.visualize else None
 
@@ -515,9 +591,14 @@ def main():
             base.start_odometry(args.odometry_hz)
         time.sleep(0.3)
         acq.start()
+        if not args.lidar_inline and not args.pose_only:
+            reglages = {k: v for k, v in acq.info.items() if k != "pid"}
+            print(f"Acquisition lidar : processus {acq.pid} dédié" + (f" ({reglages})" if reglages else ""))
         loc = Localizer(pose_source, acq.rev_queue, (args.x0, args.y0, math.radians(args.theta0_deg)),
-                        params=ekf_params, assoc=assoc, on_report=on_report, on_pose=on_pose)
+                        params=ekf_params, assoc=assoc, on_report=on_report, on_pose=on_pose, log_path=args.log)
         loc.start()
+        if loc.log_error is not None:
+            print(f"Journal impossible ({args.log}) : {loc.log_error!r} : le test continue sans journal.")
         if args.pose_only:
             print("timestamp_s,x_mm,y_mm,theta_deg", flush=True)
         else:
@@ -553,7 +634,11 @@ def main():
                 if not args.pose_only:
                     print(f"  lidar : {s['freq_hz']:5.2f} tours/s | {s['pts_per_s']:5.0f} pts/s | {s['pts_per_rev']:4.0f} pts/tour | "
                           f"vus {s['revs_seen']} publies {s['revs_published']} rejetes {s['revs_rejected']} "
-                          f"perdus {s['revs_dropped']} | erreurs lib {s['lib_errors']} | rejets {s['reject_reasons'] or '-'}")
+                          f"perdus {s['revs_dropped']} | erreurs lib {s['lib_errors']} | rejets {s['reject_reasons'] or '-'} | "
+                          f"trou max {s['max_gap_ms']:3.0f} ms" + (f" | cpu lidar {s['cpu_pct']:3.0f} %" if 'cpu_pct' in s else ""))
+            
+                print(f"Erreur du thread de fusion : {loc.error}")
+                
                 if args.drive:
                             from base_holo.tests.test_odometry import check_pose
                             check_pose(base)

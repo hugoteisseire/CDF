@@ -63,6 +63,15 @@ class EkfParams:
     history_s: float = 1.0                # au moins 1 tour de lidar (100 ms) ; 1 s laisse de la marge
     clamp_tol_s: float = 0.02             # au-delà, state_at signale un instant hors historique
 
+    # --- perte et relocalisation (étape 6) ---
+    lost_after_s: float = 1.0             # des poteaux vus mais jamais acceptés pendant ce temps : on se dit perdu
+    reloc_pos_std_mm: float = 150.0       # incertitude de la pose retrouvée par triangulation
+    reloc_theta_std_deg: float = 10.0
+    safe_std_mm: float = 50.0             # au-delà, la pose n'est plus jugée fiable pour la stratégie
+    field_mm: tuple = (0.0, 0.0, 3000.0, 2000.0)   # (xmin, ymin, xmax, ymax) : une pose hors du terrain est refusée
+    field_margin_mm: float = 300.0
+    field_filter_margin_mm: float = 200.0  # marge autour du terrain pour filtrer les impacts lidar
+
 
 class StateAt(NamedTuple):
     x: np.ndarray       # (x mm, y mm, θ rad)
@@ -199,20 +208,31 @@ class PoseEKF:
 
 
     def correct_pole(self, pole_index: int, measured_dist_mm: float, measured_angle_deg: float,
-                     gate_chi2: float = 9.21):
+                     gate_chi2: float = 9.21, t_s: Optional[float] = None):
         """Corrige l'état courant avec une mesure distance/angle d'un poteau connu.
+
+        t_s : instant (epoch, s) où le lidar a vu le poteau. Un tour dure 100 ms et n'est traité qu'une fois
+        fini : à 1 m/s, comparer la mesure à la pose COURANTE fausserait l'écart de ~100 mm. Avec t_s, la
+        mesure attendue, H et S sont calculés à la pose de cet instant (historique) ; le gain est ensuite
+        appliqué à la pose courante, et le même décalage est reporté sur l'historique pour que le poteau
+        suivant du même tour ne compte pas deux fois la même erreur. Sans t_s : pose courante (ancien comportement).
 
         Le gating utilise le seuil du chi² à 99 % pour 2 mesures (9,21). Retourne
         (acceptée, distance de Mahalanobis). Les angles sont exprimés dans le repère lidar
         horaire ; l'état EKF reste en radians anti-horaires.
         """
-        expected_dist, expected_angle_deg, H = self.measurement(self.x, pole_index)
+        x_ref, P_ref = self.x, self.P
+        if t_s is not None:
+            st = self.state_at(t_s - self.p.lidar_latency_s)
+            if st is not None:
+                x_ref, P_ref = st.x, st.P
+        expected_dist, expected_angle_deg, H = self.measurement(x_ref, pole_index)
         innovation = np.array([
             measured_dist_mm - expected_dist,
             math.radians(wrap_deg(measured_angle_deg - expected_angle_deg)),
         ], dtype=float)
         R = np.diag([self.p.meas_dist_std_mm ** 2, math.radians(self.p.meas_angle_std_deg) ** 2])
-        S = H @ self.P @ H.T + R
+        S = H @ P_ref @ H.T + R
         try:
             mahal = float(innovation.T @ np.linalg.solve(S, innovation))
         except np.linalg.LinAlgError:
@@ -220,13 +240,47 @@ class PoseEKF:
         if not math.isfinite(mahal) or mahal > gate_chi2:
             return False, mahal
         K = self.P @ H.T @ np.linalg.inv(S)
-        self.x = self.x + K @ innovation
-        self.x[2] = wrap_pi(float(self.x[2]))
+        dx = K @ innovation
+        # θ reste continu (non ramené dans [-π, π[) : l'historique est interpolé entre deux entrées, un saut
+        # de 2π le fausserait. `pose` ramène le cap dans [-π, π[ en sortie.
+        self.x = self.x + dx
+        for hx in self._hx:                          # même décalage sur toute la fenêtre récente
+            hx += dx
         I_KH = np.eye(3) - K @ H
         # Forme de Joseph : conserve une covariance symétrique/positive malgré les arrondis.
         self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
         self.P = (self.P + self.P.T) * 0.5
+        if self._hP:
+            self._hP[-1] = self.P.copy()
         return True, mahal
+
+    # ------------------------------------------------------------------ étape 6 : relocalisation
+    def relocalize(self, x_mm, y_mm, theta_rad, t_ref_s, pos_std_mm=None, theta_std_rad=None):
+        """Remplace la pose par celle trouvée par triangulation, valable à l'instant t_ref_s.
+
+        Le déplacement accumulé depuis t_ref_s (historique de l'odométrie) est rejoué à partir de la
+        nouvelle pose pour revenir à « maintenant ». L'incertitude est remise à une grande valeur et
+        l'historique est repris à zéro ; la référence de l'odométrie est conservée, donc la prédiction
+        continue sans à-coup. Retourne la nouvelle pose courante (x mm, y mm, θ rad).
+        """
+        sp = self.p.reloc_pos_std_mm if pos_std_mm is None else pos_std_mm
+        st = math.radians(self.p.reloc_theta_std_deg) if theta_std_rad is None else theta_std_rad
+        now_t = self._ht[-1] if self._ht else t_ref_s
+        new = np.array([x_mm, y_mm, theta_rad], dtype=float)
+        ref = self.state_at(t_ref_s)
+        if ref is not None:
+            c, s = math.cos(ref.x[2]), math.sin(ref.x[2])
+            dx, dy = self.x[0] - ref.x[0], self.x[1] - ref.x[1]
+            dxl, dyl = c * dx + s * dy, -s * dx + c * dy             # déplacement depuis t_ref, repère robot
+            dth = wrap_pi(float(self.x[2] - ref.x[2]))
+            c2, s2 = math.cos(theta_rad), math.sin(theta_rad)
+            new = np.array([x_mm + c2 * dxl - s2 * dyl, y_mm + s2 * dxl + c2 * dyl, theta_rad + dth])
+        self.x = new
+        self.x[2] = wrap_pi(float(self.x[2]))
+        self.P = np.diag([sp * sp, sp * sp, st * st])
+        self._ht, self._hx, self._hP = [], [], []
+        self._record(now_t)
+        return self.pose
 
     def predicted_std(self, P, H):
         """Écarts-types attendus d'une mesure de poteau : (σ distance mm, σ angle °),
