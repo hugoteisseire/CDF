@@ -752,6 +752,20 @@ def test_window_scale_widens_the_search_window_and_catches_an_overconfident_filt
         assert n.win_angle_deg == pytest.approx(3.0 * o.win_angle_deg)
 
 
+def test_hard_correction_guard_rejects_large_pose_jump_even_when_chi2_passes():
+    """Une covariance élevée peut rendre le chi² permissif : le garde-fou borne aussi le déplacement proposé."""
+    ekf = make_ekf(1000.0, 1000.0, 0.0, pos_std=500.0, th_std_rad=math.radians(20.0))
+    before = ekf.x.copy()
+    # Mesure plausible au regard de la covariance, mais dont la correction EKF serait trop importante.
+    expected_dist, expected_angle, _ = ekf.measurement(ekf.x, 0)
+    ok, mahal = ekf.correct_pole(
+        0, expected_dist + 100.0, expected_angle, t_s=T0 + 0.1
+    )
+    assert mahal < 9.21
+    assert not ok
+    assert ekf.x == pytest.approx(before)
+
+
 def test_wider_window_may_pick_a_wrong_cluster_but_the_gate_refuses_to_correct_with_it():
     """Prix du coefficient 3 : si un poteau est masqué, un parasite de sa taille à ~250 mm peut entrer dans la
     fenêtre et être pris pour lui. La correction de pose, elle, reste protégée par le gating du chi² : la pose ne bouge pas."""

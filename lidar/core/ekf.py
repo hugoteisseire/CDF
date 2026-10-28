@@ -59,6 +59,12 @@ class EkfParams:
     meas_dist_std_mm: float = 25.0
     meas_angle_std_deg: float = 0.4
 
+    # --- garde-fou : déplacement maximal provoqué par une seule correction lidar ---
+    # Une mesure peut passer le chi² avec une covariance large ; on borne donc aussi l'effet
+    # réel sur la pose avant d'appliquer la correction.
+    max_correction_pos_mm: float = 50.0
+    max_correction_theta_deg: float = 3.0
+
     # --- historique ---
     history_s: float = 1.0                # au moins 1 tour de lidar (100 ms) ; 1 s laisse de la marge
     clamp_tol_s: float = 0.02             # au-delà, state_at signale un instant hors historique
@@ -241,6 +247,16 @@ class PoseEKF:
             return False, mahal
         K = self.P @ H.T @ np.linalg.inv(S)
         dx = K @ innovation
+
+        # Deuxième garde-fou indépendant du chi² : quand P est grande, une mesure aberrante peut
+        # avoir un Mahalanobis acceptable tout en déplaçant fortement la pose. Dans ce cas, on
+        # refuse la correction entière (pas de saturation qui rendrait la covariance incohérente).
+        correction_pos_mm = math.hypot(float(dx[0]), float(dx[1]))
+        correction_theta_deg = abs(math.degrees(float(dx[2])))
+        if (correction_pos_mm > self.p.max_correction_pos_mm
+                or correction_theta_deg > self.p.max_correction_theta_deg):
+            return False, mahal
+
         # θ reste continu (non ramené dans [-π, π[) : l'historique est interpolé entre deux entrées, un saut
         # de 2π le fausserait. `pose` ramène le cap dans [-π, π[ en sortie.
         self.x = self.x + dx
