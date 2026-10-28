@@ -36,8 +36,6 @@ class EkfParams:
     # --- terrain ---
     poles_mm: tuple = ((3094.0, 72.0), (3094.0, 1928.0), (1725.0, 2120.0))   # centres des poteaux
     pole_radius_mm: float = 50.0                                   # poteaux de 100 mm de diamètre
-    field_size_mm: tuple = (3000.0, 2000.0)                        # dimensions utiles de la zone de jeu
-    field_margin_mm: float = 200.0                                 # marge conservée autour du terrain
 
     # --- montage du lidar (à mesurer sur le robot) ---
     lidar_offset_mm: tuple = (0.0, 0.0)   # position du lidar dans le repère robot (x vers la roue 3, y à 90°)
