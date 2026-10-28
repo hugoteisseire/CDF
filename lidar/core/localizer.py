@@ -53,10 +53,16 @@ def _filter_points_in_field(points, ekf: PoseEKF):
     for point in points:
         t_s = float(point["t_ns"]) / 1e9 - p.lidar_latency_s
         state = ekf.state_at(t_s)
-        if state is None or state.clamped:
+        if state is None:
+            # Pas encore d'historique exploitable : impossible de projeter ce point.
             unverified += 1
             keep.append(False)
             continue
+        if state.clamped:
+            # On utilise l'état historique le plus proche fourni par state_at plutôt que
+            # de supprimer tout un tour dès que son horodatage dépasse l'historique.
+            # Le compteur permet de repérer un éventuel problème de synchronisation.
+            unverified += 1
 
         x, y, theta = state.x
         c, s = math.cos(float(theta)), math.sin(float(theta))
