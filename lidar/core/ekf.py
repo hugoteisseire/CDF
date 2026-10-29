@@ -67,7 +67,7 @@ class EkfParams:
 
     # --- historique ---
     history_s: float = 1.0                # au moins 1 tour de lidar (100 ms) ; 1 s laisse de la marge
-    clamp_tol_s: float = 0.02             # au-delà, state_at signale un instant hors historique
+    clamp_tol_s: float = 0.10             # tolérance temporelle élargie à 100 ms
 
     # --- perte et relocalisation (étape 6) ---
     lost_after_s: float = 1.0             # des poteaux vus mais jamais acceptés pendant ce temps : on se dit perdu
