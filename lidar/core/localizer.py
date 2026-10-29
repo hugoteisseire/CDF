@@ -306,10 +306,19 @@ class Localizer:
                 if dropped:
                     self.revs_skipped += dropped
                     self._timestamp_diag(
-                        f"MESURES TROP ANCIENNES : {dropped} tour(s) périmé(s) écarté(s), "
-                        f"conservation du tour {newest.number}"
+                        f"MESURES TROP ANCIENNES : {dropped} tour(s) intermédiaire(s) écarté(s), "
+                        f"conservation du plus récent (tour {newest.number})"
                     )
-                rev = newest
+                    rev = newest
+                else:
+                    # Aucun tour plus récent à substituer : celui-ci est inutilisable.
+                    self.revs_skipped += 1
+                    delta_ms = (history_start - rev_end_s) * 1000.0
+                    self._timestamp_diag(
+                        f"MESURE TROP ANCIENNE : tour {rev.number}, début d'historique EKF "
+                        f"{delta_ms:.1f} ms après la fin du tour ; tour ignoré"
+                    )
+                    continue
 
             # Ne pas traiter une mesure dont l'instant est encore dans le futur par rapport
             # à l'historique EKF : state_at() la bornerait au dernier état, et correct_pole()
