@@ -27,12 +27,10 @@ from .relocalize import RelocParams, triangulate
 from .timebase import ClockAligner
 
 def _filter_points_in_field(points, ekf: PoseEKF):
-    """Filtre les impacts hors terrain et retourne aussi leurs coordonnées terrain.
+    """Filtre les impacts hors terrain en projetant tous les points par lots NumPy.
 
-    Chaque impact est projeté avec la pose EKF interpolée à son horodatage (corrigé
-    du retard configuré du lidar). Les points dont l'horodatage ne peut pas être
-    associé à l'historique EKF sont rejetés : les conserver rendrait le filtre
-    inefficace et produirait un nuage incohérent.
+    Seules les poses historiques sont nécessaires ici : appeler state_at() point par point
+    calculait aussi les covariances interpolées, inutiles pour ce filtre géométrique.
     """
     import numpy as np
 
@@ -47,40 +45,49 @@ def _filter_points_in_field(points, ekf: PoseEKF):
     xmax += margin
     ymax += margin
     ox, oy = p.lidar_offset_mm
-    keep = []
-    world_xy = []
-    unverified = 0
 
-    for point in points:
-        t_s = float(point["t_ns"]) / 1e9 - p.lidar_latency_s
-        state = ekf.state_at(t_s)
-        if state is None:
-            # Pas encore d'historique exploitable : impossible de projeter ce point.
-            unverified += 1
-            keep.append(False)
-            continue
-        if state.clamped:
-            # On utilise l'état historique le plus proche fourni par state_at plutôt que
-            # de supprimer tout un tour dès que son horodatage dépasse l'historique.
-            # Le compteur permet de repérer un éventuel problème de synchronisation.
-            unverified += 1
+    # Snapshot de l'historique. On n'interpole que x, y et theta, pas les covariances.
+    if not ekf._ht:
+        return points[:0], np.empty((0, 2), dtype=float), len(points)
 
-        x, y, theta = state.x
-        c, s = math.cos(float(theta)), math.sin(float(theta))
-        lidar_x = float(x) + c * ox - s * oy
-        lidar_y = float(y) + s * ox + c * oy
-        world_angle = float(theta) + math.radians(p.lidar_zero_deg - float(point["angle"]))
-        distance = float(point["dist"])
-        hit_x = lidar_x + distance * math.cos(world_angle)
-        hit_y = lidar_y + distance * math.sin(world_angle)
+    hist_t = np.asarray(ekf._ht, dtype=float)
+    hist_x = np.asarray(ekf._hx, dtype=float)
+    t_s = np.asarray(points["t_ns"], dtype=np.float64) / 1e9 - p.lidar_latency_s
+    angles = np.asarray(points["angle"], dtype=float)
+    distances = np.asarray(points["dist"], dtype=float)
 
-        if xmin <= hit_x <= xmax and ymin <= hit_y <= ymax:
-            keep.append(True)
-            world_xy.append((hit_x, hit_y))
-        else:
-            keep.append(False)
+    # Interpolation vectorisée équivalente à state_at() pour la pose. Les timestamps
+    # en dehors de l'historique utilisent la pose la plus proche et sont comptés.
+    idx1 = np.searchsorted(hist_t, t_s, side="right")
+    before = idx1 == 0
+    after = idx1 >= len(hist_t)
+    clamped = before | after
+    unverified = int(np.count_nonzero(
+        (before & (t_s < hist_t[0] - p.clamp_tol_s))
+        | (after & (t_s > hist_t[-1] + p.clamp_tol_s))
+    ))
 
-    return points[keep], np.asarray(world_xy, dtype=float).reshape((-1, 2)), unverified
+    idx0 = np.clip(idx1 - 1, 0, len(hist_t) - 1)
+    idx1 = np.clip(idx1, 0, len(hist_t) - 1)
+    t0, t1 = hist_t[idx0], hist_t[idx1]
+    denom = t1 - t0
+    w = np.zeros_like(t_s)
+    valid_span = denom > 0
+    w[valid_span] = (t_s[valid_span] - t0[valid_span]) / denom[valid_span]
+    w = np.clip(w, 0.0, 1.0)
+    poses = (1.0 - w[:, None]) * hist_x[idx0] + w[:, None] * hist_x[idx1]
+    x, y, theta = poses[:, 0], poses[:, 1], poses[:, 2]
+
+    c, s = np.cos(theta), np.sin(theta)
+    lidar_x = x + c * ox - s * oy
+    lidar_y = y + s * ox + c * oy
+    world_angle = theta + np.radians(p.lidar_zero_deg - angles)
+    hit_x = lidar_x + distances * np.cos(world_angle)
+    hit_y = lidar_y + distances * np.sin(world_angle)
+
+    keep = (hit_x >= xmin) & (hit_x <= xmax) & (hit_y >= ymin) & (hit_y <= ymax)
+    world_xy = np.column_stack((hit_x[keep], hit_y[keep]))
+    return points[keep], world_xy, unverified
 
 LOG_COLUMNS = ("t_s", "rev", "x_mm", "y_mm", "theta_deg", "sigma_x_mm", "sigma_y_mm", "sigma_theta_deg",
                "n_clusters", "n_matched", "corr_accepted", "corr_rejected", "mahal_mean",
