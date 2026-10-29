@@ -357,7 +357,7 @@ class Localizer:
             self.revs_processed += 1
         report = Report(
             rev.number, t_ref, len(rev.points), len(capped), len(clusters), res, pose, std,
-            (t5 - t0) * 1e3, clusters,
+            (t5 - t0) * 1e3, clusters=clusters,
             acq_to_correction_ms=e2e_ms, acq_to_correction_avg_5s_ms=e2e_avg_5s_ms,
             points=in_field,
             points_world_mm=points_world_mm, points_unverified=points_unverified,
