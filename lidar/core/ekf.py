@@ -50,8 +50,8 @@ class EkfParams:
     # Modèle "marche aléatoire" calé sur le plan : "2 % -> 1 m parcouru ajoute ~20 mm d'incertitude".
     # Variance ajoutée à chaque pas = err² x distance du pas x distance de référence, donc après
     # 1 m (= la référence) l'écart-type vaut err x 1 m = 20 mm.
-    odo_trans_err: float = 0.02           # 2 % de la distance
-    odo_rot_err: float = 0.01             # 1 % de l'angle
+    odo_trans_err: float = 0.06           # 6 % de la distance : incertitude odométrique multipliée par 3
+    odo_rot_err: float = 0.03             # 3 % de l'angle : incertitude odométrique multipliée par 3
     odo_ref_dist_mm: float = 1000.0
     odo_ref_angle_rad: float = 1.0
 
@@ -62,8 +62,8 @@ class EkfParams:
     # --- garde-fou : déplacement maximal provoqué par une seule correction lidar ---
     # Une mesure peut passer le chi² avec une covariance large ; on borne donc aussi l'effet
     # réel sur la pose avant d'appliquer la correction.
-    max_correction_pos_mm: float = 100.0
-    max_correction_theta_deg: float = 6.0
+    max_correction_pos_mm: float = 300.0
+    max_correction_theta_deg: float = 18.0
 
     # --- historique ---
     history_s: float = 1.0                # au moins 1 tour de lidar (100 ms) ; 1 s laisse de la marge
