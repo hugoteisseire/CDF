@@ -340,7 +340,7 @@ class PoseEKF:
         self.x[2] = wrap_pi(float(self.x[2]))
         self.P = np.diag([sp * sp, sp * sp, st * st])
         self._ht, self._hx, self._hP = [], [], []
-        self._hC = []
+        self._hC = np.empty((0, 0, 3, 3), dtype=float)
         self._record(now_t)
         return self.pose
 
