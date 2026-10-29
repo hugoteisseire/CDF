@@ -243,7 +243,7 @@ class PoseEKF:
 
 
     def correct_pole(self, pole_index: int, measured_dist_mm: float, measured_angle_deg: float,
-                     gate_chi2: float = 9.21, t_s: Optional[float] = None):
+                     gate_chi2: float = 18.42, t_s: Optional[float] = None):
         """Corrige une mesure de poteau, y compris lorsqu'elle est retardée.
 
         Les covariances croisées de l'historique donnent Cov(x_i, x_mesure) : la correction
