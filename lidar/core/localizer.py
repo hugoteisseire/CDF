@@ -102,7 +102,7 @@ class Report:
     acq_to_correction_avg_5s_ms: float = 0.0  # moyenne glissante sur les 5 dernières secondes
     clusters: list = field(default_factory=list)   # clusters du tour (diagnostic : où le lidar voit des objets)
     corrections_accepted: int = 0
-    corrections_rejected: int = 0                  # refusées par le gating (chi² 99 %)
+    corrections_rejected: int = 0                  # refusées par le gating statistique
     mahal: list = field(default_factory=list)      # écart normalisé de chaque correction acceptée (moyenne ~2 attendue)
     lost: bool = False                             # le filtre se considère perdu (aucune correction depuis > lost_after_s)
     relocalized: bool = False                      # la pose a été reprise par triangulation à ce tour
