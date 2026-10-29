@@ -143,8 +143,10 @@ class Localizer:
         self._stop = threading.Event()
         self._thread = None
         self.revs_processed = 0
-        self.revs_skipped = 0      # tours arrivés avant le premier échantillon d'odométrie
+        self.revs_skipped = 0      # tours ignorés (démarrage ou rattrapage de file)
         self.error = None
+        self._last_timestamp_diag = 0.0
+        self._timestamp_waits = 0
         # perte / relocalisation
         self.lost = False
         self.relocalizations = 0
@@ -263,8 +265,18 @@ class Localizer:
         if self._on_pose is not None:
             self._on_pose(ts, pose)
 
+    def _timestamp_diag(self, message: str):
+        """Évite de saturer la console avec un diagnostic répété à chaque tour."""
+        now = time.monotonic()
+        if now - self._last_timestamp_diag >= 1.0:
+            print(f"[LOCALIZER TIMESTAMP] {message}", flush=True)
+            self._last_timestamp_diag = now
+
     def _process_revs(self):
         while True:
+            # Garder l'historique EKF aussi récent que possible, même si plusieurs tours
+            # lidar attendent dans la file.
+            self._poll_odometry()
             try:
                 rev = self._q.get_nowait()
             except queue.Empty:
@@ -293,7 +305,35 @@ class Localizer:
                         break
                 if dropped:
                     self.revs_skipped += dropped
+                    self._timestamp_diag(
+                        f"MESURES TROP ANCIENNES : {dropped} tour(s) périmé(s) écarté(s), "
+                        f"conservation du tour {newest.number}"
+                    )
                 rev = newest
+
+            # Ne pas traiter une mesure dont l'instant est encore dans le futur par rapport
+            # à l'historique EKF : state_at() la bornerait au dernier état, et correct_pole()
+            # finirait par refuser la correction. On la remet en tête logique de la file
+            # (file FIFO non bornée attendue) et on laisse la boucle principale repoller l'odo.
+            with self._lock:
+                history_end = self.ekf._ht[-1] if self.ekf._ht else None
+                tol_s = self.ekf.p.clamp_tol_s
+                latency_s = self.ekf.p.lidar_latency_s
+            rev_ref_s = (rev.t_start_ns + rev.t_end_ns) / 2e9 - latency_s
+            if history_end is not None and rev_ref_s > history_end + tol_s:
+                try:
+                    self._q.put_nowait(rev)
+                except queue.Full:
+                    # Ne pas perdre silencieusement le tour si un producteur utilise une
+                    # file bornée : le prochain tour sera préféré au rattrapage.
+                    self.revs_skipped += 1
+                delta_ms = (rev_ref_s - history_end) * 1000.0
+                self._timestamp_waits += 1
+                self._timestamp_diag(
+                    f"MESURE TROP RÉCENTE : tour {rev.number}, EKF en retard de {delta_ms:.1f} ms "
+                    f"(tolérance {tol_s * 1000:.0f} ms), attente de l'odométrie"
+                )
+                return
 
             self._process_one(rev)
 
@@ -311,6 +351,9 @@ class Localizer:
         # Milieu du tour (secondes) : sert d'instant de référence pour afficher la mesure attendue des poteaux
         # sans candidat et pour dater une relocalisation. Les clusters, eux, sont datés point par point.
         t_ref = (rev.t_start_ns + rev.t_end_ns) / 2e9
+        # Le clustering peut prendre plusieurs dizaines de ms : rafraîchir l'odométrie
+        # avant l'association et les corrections afin que l'historique couvre les mesures.
+        self._poll_odometry()
         res = associate_poles(self.ekf, clusters, t_ref, self._assoc)
         t3 = time.perf_counter()
 
@@ -319,6 +362,9 @@ class Localizer:
         # La distance mesurée est ramenée au centre du poteau (le lidar voit sa surface).
         accepted = rejected = 0
         mahals = []
+        # Nouvelle lecture juste avant la correction : l'association peut elle aussi prendre
+        # du temps et ne doit pas laisser l'EKF derrière l'instant de mesure.
+        self._poll_odometry()
         with self._lock:
             for match in res.matches:
                 if match.status != "matched" or match.cluster is None:
