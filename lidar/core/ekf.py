@@ -62,8 +62,8 @@ class EkfParams:
     # --- garde-fou : déplacement maximal provoqué par une seule correction lidar ---
     # Une mesure peut passer le chi² avec une covariance large ; on borne donc aussi l'effet
     # réel sur la pose avant d'appliquer la correction.
-    max_correction_pos_mm: float = 50.0
-    max_correction_theta_deg: float = 3.0
+    max_correction_pos_mm: float = 100.0
+    max_correction_theta_deg: float = 6.0
 
     # --- historique ---
     history_s: float = 1.0                # au moins 1 tour de lidar (100 ms) ; 1 s laisse de la marge
@@ -243,7 +243,7 @@ class PoseEKF:
 
 
     def correct_pole(self, pole_index: int, measured_dist_mm: float, measured_angle_deg: float,
-                     gate_chi2: float = 18.42, t_s: Optional[float] = None):
+                     gate_chi2: float = 9.21, t_s: Optional[float] = None):
         """Corrige une mesure de poteau, y compris lorsqu'elle est retardée.
 
         Les covariances croisées de l'historique donnent Cov(x_i, x_mesure) : la correction
