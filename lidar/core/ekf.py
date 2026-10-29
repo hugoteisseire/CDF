@@ -62,8 +62,8 @@ class EkfParams:
     # --- garde-fou : déplacement maximal provoqué par une seule correction lidar ---
     # Une mesure peut passer le chi² avec une covariance large ; on borne donc aussi l'effet
     # réel sur la pose avant d'appliquer la correction.
-    max_correction_pos_mm: float = 50.0
-    max_correction_theta_deg: float = 3.0
+    max_correction_pos_mm: float = 100.0
+    max_correction_theta_deg: float = 6.0
 
     # --- historique ---
     history_s: float = 1.0                # au moins 1 tour de lidar (100 ms) ; 1 s laisse de la marge
@@ -93,6 +93,8 @@ class PoseEKF:
         self.ready = False
         self._odo_prev = None                     # dernier échantillon d'odométrie (x, y, θ, t)
         self._ht, self._hx, self._hP = [], [], []  # historique : instants, poses, covariances
+        # _hC[i][j] = Cov(x_i, x_j), indispensable pour traiter une mesure retardée.
+        self._hC = np.empty((0, 0, 3, 3), dtype=float)
 
     # ------------------------------------------------------------------ étape 1 : état
     def reset(self, x_mm, y_mm, theta_rad, t_s, pos_std_mm=None, theta_std_rad=None):
@@ -103,6 +105,7 @@ class PoseEKF:
         self.P = np.diag([sp * sp, sp * sp, st * st])
         self._odo_prev = None
         self._ht, self._hx, self._hP = [], [], []
+        self._hC = np.empty((0, 0, 3, 3), dtype=float)
         self._record(t_s)
         self.ready = True
 
@@ -157,19 +160,39 @@ class PoseEKF:
         G = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
         Q = G @ np.diag([var_t, var_t, var_r]) @ G.T
         self.P = F @ self.P @ F.T + Q
-        self._record(t_s)
+        self._record(t_s, transition_F=F)
 
     # ------------------------------------------------------------------ historique
-    def _record(self, t_s):
-        if self._ht and t_s <= self._ht[-1]:       # même instant : on remplace la dernière entrée
+    def _record(self, t_s, transition_F=None):
+        """Enregistre un état et propage les covariances croisées de l'historique.
+
+        transition_F est la jacobienne de la transition depuis le dernier état enregistré.
+        Sans transition, le nouvel échantillon représente le même état (première lecture odo).
+        """
+        if self._ht and t_s <= self._ht[-1]:       # même instant : remplace la dernière entrée
             self._hx[-1], self._hP[-1] = self.x.copy(), self.P.copy()
+            self._hC[-1, -1] = self.P.copy()
             return
+        if not self._ht:
+            self._hC = self.P.reshape((1, 1, 3, 3)).copy()
+        else:
+            F = np.eye(3) if transition_F is None else transition_F
+            n = len(self._ht)
+            old = self._hC
+            cross = old[:, -1] @ F.T              # Cov(x_i, x_new), vectorisé sur i
+            expanded = np.empty((n + 1, n + 1, 3, 3), dtype=float)
+            expanded[:n, :n] = old
+            expanded[:n, n] = cross
+            expanded[n, :n] = cross.transpose(0, 2, 1)
+            expanded[n, n] = self.P
+            self._hC = expanded
         self._ht.append(t_s)
         self._hx.append(self.x.copy())
         self._hP.append(self.P.copy())
-        k = bisect.bisect_left(self._ht, t_s - self.p.history_s) - 1   # on garde 1 entrée avant la coupure
+        k = bisect.bisect_left(self._ht, t_s - self.p.history_s) - 1   # garde 1 entrée avant la coupure
         if k > 0:
             del self._ht[:k], self._hx[:k], self._hP[:k]
+            self._hC = self._hC[k:, k:].copy()
 
     def state_at(self, t_s) -> Optional[StateAt]:
         """Pose et incertitude à l'instant t_s (interpolées). Hors historique : on prend l'entrée la
@@ -183,9 +206,15 @@ class PoseEKF:
         if t_s >= ts[-1]:
             return StateAt(self._hx[-1].copy(), self._hP[-1].copy(), t_s > ts[-1] + tol)
         i = bisect.bisect_right(ts, t_s)
-        w = (t_s - ts[i - 1]) / (ts[i] - ts[i - 1])
-        return StateAt((1 - w) * self._hx[i - 1] + w * self._hx[i],
-                       (1 - w) * self._hP[i - 1] + w * self._hP[i], False)
+        i0, i1 = i - 1, i
+        w = (t_s - ts[i0]) / (ts[i1] - ts[i0])
+        # Covariance de l'état interpolé, avec le terme croisé entre les deux échantillons.
+        P0, P1 = self._hP[i0], self._hP[i1]
+        P01 = self._hC[i0, i1]
+        P = ((1 - w) ** 2 * P0 + w ** 2 * P1
+             + w * (1 - w) * (P01 + P01.T))
+        P = (P + P.T) * 0.5
+        return StateAt((1 - w) * self._hx[i0] + w * self._hx[i1], P, False)
 
     # ------------------------------------------------------------------ modèle de mesure (étapes 3 et 4)
     def measurement(self, x, pole_index):
@@ -215,23 +244,37 @@ class PoseEKF:
 
     def correct_pole(self, pole_index: int, measured_dist_mm: float, measured_angle_deg: float,
                      gate_chi2: float = 9.21, t_s: Optional[float] = None):
-        """Corrige l'état courant avec une mesure distance/angle d'un poteau connu.
+        """Corrige une mesure de poteau, y compris lorsqu'elle est retardée.
 
-        t_s : instant (epoch, s) où le lidar a vu le poteau. Un tour dure 100 ms et n'est traité qu'une fois
-        fini : à 1 m/s, comparer la mesure à la pose COURANTE fausserait l'écart de ~100 mm. Avec t_s, la
-        mesure attendue, H et S sont calculés à la pose de cet instant (historique) ; le gain est ensuite
-        appliqué à la pose courante, et le même décalage est reporté sur l'historique pour que le poteau
-        suivant du même tour ne compte pas deux fois la même erreur. Sans t_s : pose courante (ancien comportement).
-
-        Le gating utilise le seuil du chi² à 99 % pour 2 mesures (9,21). Retourne
-        (acceptée, distance de Mahalanobis). Les angles sont exprimés dans le repère lidar
-        horaire ; l'état EKF reste en radians anti-horaires.
+        Les covariances croisées de l'historique donnent Cov(x_i, x_mesure) : la correction
+        est propagée à chaque état avec son propre gain, puis toutes les covariances croisées
+        sont mises à jour. Une mesure hors de la fenêtre historique est refusée.
         """
-        x_ref, P_ref = self.x, self.P
-        if t_s is not None:
+        n = len(self._ht)
+        if n == 0:
+            return False, float("inf")
+
+        if t_s is None:
+            x_ref, P_ref = self.x.copy(), self.P.copy()
+            cross_ref = self._hC[:, -1].copy()
+        else:
             st = self.state_at(t_s - self.p.lidar_latency_s)
-            if st is not None:
-                x_ref, P_ref = st.x, st.P
+            if st is None or st.clamped:
+                return False, float("inf")
+            x_ref, P_ref = st.x, st.P
+            ts = self._ht
+            if t_s - self.p.lidar_latency_s <= ts[0]:
+                i0 = i1 = 0
+                w = 0.0
+            elif t_s - self.p.lidar_latency_s >= ts[-1]:
+                i0 = i1 = n - 1
+                w = 0.0
+            else:
+                i1 = bisect.bisect_right(ts, t_s - self.p.lidar_latency_s)
+                i0 = i1 - 1
+                w = ((t_s - self.p.lidar_latency_s - ts[i0]) / (ts[i1] - ts[i0]))
+            cross_ref = (1.0 - w) * self._hC[:, i0] + w * self._hC[:, i1]
+
         expected_dist, expected_angle_deg, H = self.measurement(x_ref, pole_index)
         innovation = np.array([
             measured_dist_mm - expected_dist,
@@ -240,34 +283,36 @@ class PoseEKF:
         R = np.diag([self.p.meas_dist_std_mm ** 2, math.radians(self.p.meas_angle_std_deg) ** 2])
         S = H @ P_ref @ H.T + R
         try:
-            mahal = float(innovation.T @ np.linalg.solve(S, innovation))
+            S_inv = np.linalg.solve(S, np.eye(2))
         except np.linalg.LinAlgError:
             return False, float("inf")
+        mahal = float(innovation.T @ S_inv @ innovation)
         if not math.isfinite(mahal) or mahal > gate_chi2:
             return False, mahal
-        K = self.P @ H.T @ np.linalg.inv(S)
-        dx = K @ innovation
 
-        # Deuxième garde-fou indépendant du chi² : quand P est grande, une mesure aberrante peut
-        # avoir un Mahalanobis acceptable tout en déplaçant fortement la pose. Dans ce cas, on
-        # refuse la correction entière (pas de saturation qui rendrait la covariance incohérente).
-        correction_pos_mm = math.hypot(float(dx[0]), float(dx[1]))
-        correction_theta_deg = abs(math.degrees(float(dx[2])))
+        # Gain différent pour chaque instant : K_i = Cov(x_i, x_ref) H' S^-1.
+        gains = cross_ref @ H.T @ S_inv             # (N, 3, 2)
+        dx_now = gains[-1] @ innovation
+        correction_pos_mm = math.hypot(float(dx_now[0]), float(dx_now[1]))
+        correction_theta_deg = abs(math.degrees(float(dx_now[2])))
         if (correction_pos_mm > self.p.max_correction_pos_mm
                 or correction_theta_deg > self.p.max_correction_theta_deg):
             return False, mahal
 
-        # θ reste continu (non ramené dans [-π, π[) : l'historique est interpolé entre deux entrées, un saut
-        # de 2π le fausserait. `pose` ramène le cap dans [-π, π[ en sortie.
-        self.x = self.x + dx
-        for hx in self._hx:                          # même décalage sur toute la fenêtre récente
-            hx += dx
-        I_KH = np.eye(3) - K @ H
-        # Forme de Joseph : conserve une covariance symétrique/positive malgré les arrondis.
-        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
-        self.P = (self.P + self.P.T) * 0.5
-        if self._hP:
-            self._hP[-1] = self.P.copy()
+        # Mise à jour de tous les états historiques avec leur gain propre.
+        dx_history = gains @ innovation
+        self._hx = [x + dx for x, dx in zip(self._hx, dx_history)]
+
+        # Mise à jour conditionnelle complète, vectorisée : P_ij+ = P_ij - K_i H Cov(x_ref, x_j).
+        # Le tenseur contient toutes les covariances croisées; la symétrisation limite les erreurs d'arrondi.
+        kh = gains @ H
+        cov_ref_j = cross_ref.transpose(0, 2, 1)
+        self._hC -= np.einsum("iab,jbc->ijac", kh, cov_ref_j, optimize=True)
+        self._hC = 0.5 * (self._hC + self._hC.transpose(1, 0, 3, 2))
+        self._hP = [self._hC[i, i].copy() for i in range(n)]
+
+        self.x = self._hx[-1].copy()
+        self.P = self._hP[-1].copy()
         return True, mahal
 
     # ------------------------------------------------------------------ étape 6 : relocalisation
@@ -295,6 +340,7 @@ class PoseEKF:
         self.x[2] = wrap_pi(float(self.x[2]))
         self.P = np.diag([sp * sp, sp * sp, st * st])
         self._ht, self._hx, self._hP = [], [], []
+        self._hC = np.empty((0, 0, 3, 3), dtype=float)
         self._record(now_t)
         return self.pose
 

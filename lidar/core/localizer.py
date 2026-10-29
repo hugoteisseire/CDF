@@ -14,6 +14,7 @@ pouvoir tester sans robot. `log_path` écrit un journal CSV (un tour par ligne) 
 import csv
 import math
 import queue
+from collections import deque
 import threading
 import time
 from dataclasses import dataclass, field
@@ -83,7 +84,7 @@ def _filter_points_in_field(points, ekf: PoseEKF):
 
 LOG_COLUMNS = ("t_s", "rev", "x_mm", "y_mm", "theta_deg", "sigma_x_mm", "sigma_y_mm", "sigma_theta_deg",
                "n_clusters", "n_matched", "corr_accepted", "corr_rejected", "mahal_mean",
-               "lost", "relocalized", "reliable", "proc_ms")
+               "lost", "relocalized", "reliable", "proc_ms", "acq_to_correction_ms", "acq_to_correction_avg_5s_ms")
 
 
 @dataclass
@@ -96,10 +97,12 @@ class Report:
     result: AssocResult
     pose: tuple                # (x mm, y mm, θ rad) après les corrections du tour
     std: tuple                 # (σx mm, σy mm, σθ °)
-    proc_ms: float             # temps de traitement du tour (doit rester << 100 ms)
+    proc_ms: float             # temps de calcul pur du tour (doit rester << 100 ms)
+    acq_to_correction_ms: float = 0.0       # du premier point du tour à la fin des corrections
+    acq_to_correction_avg_5s_ms: float = 0.0  # moyenne glissante sur les 5 dernières secondes
     clusters: list = field(default_factory=list)   # clusters du tour (diagnostic : où le lidar voit des objets)
     corrections_accepted: int = 0
-    corrections_rejected: int = 0                  # refusées par le gating (chi² 99 %)
+    corrections_rejected: int = 0                  # refusées par le gating statistique
     mahal: list = field(default_factory=list)      # écart normalisé de chaque correction acceptée (moyenne ~2 attendue)
     lost: bool = False                             # le filtre se considère perdu (aucune correction depuis > lost_after_s)
     relocalized: bool = False                      # la pose a été reprise par triangulation à ce tour
@@ -150,6 +153,11 @@ class Localizer:
         self._odo_n = 0
         self._odo_win_t0 = time.perf_counter()
         self._odo_hz = 0.0
+        # Latence de bout en bout : durée acquisition + attente en file + traitement/correction.
+        # Fenêtre glissante indexée sur l'instant de fin de traitement (horloge monotone).
+        self._e2e_samples = deque()
+        self._e2e_last_ms = 0.0
+        self._e2e_avg_5s_ms = 0.0
         # journal
         self._log_path = log_path
         self._log_f = None
@@ -181,7 +189,8 @@ class Localizer:
                     "reliable": ready and not self.lost and math.hypot(sx, sy) < self.ekf.p.safe_std_mm,
                     "lost": self.lost, "relocalizations": self.relocalizations,
                     "revs_processed": self.revs_processed, "revs_skipped": self.revs_skipped,
-                    "odo_hz": self._odo_hz}
+                    "odo_hz": self._odo_hz, "acq_to_correction_ms": self._e2e_last_ms,
+                    "acq_to_correction_avg_5s_ms": self._e2e_avg_5s_ms}
 
     # ------------------------------------------------------------------ journal
     def _open_log(self):
@@ -206,7 +215,8 @@ class Localizer:
                                   f"{r.std[0]:.2f}", f"{r.std[1]:.2f}", f"{r.std[2]:.3f}",
                                   r.n_clusters, n_matched, r.corrections_accepted, r.corrections_rejected,
                                   f"{mahal_mean:.3f}" if mahal_mean != "" else "",
-                                  int(r.lost), int(r.relocalized), int(r.reliable), f"{r.proc_ms:.2f}"])
+                                  int(r.lost), int(r.relocalized), int(r.reliable), f"{r.proc_ms:.2f}",
+                                  f"{r.acq_to_correction_ms:.2f}", f"{r.acq_to_correction_avg_5s_ms:.2f}"])
             self._log_f.flush()
         except OSError as e:
             self.log_error = e
@@ -283,7 +293,7 @@ class Localizer:
         t3 = time.perf_counter()
 
         # Étape 4 : correction séquentielle. Chaque mesure validée par l'association est soumise au gating
-        # statistique (chi² 99 %, 2 ddl), à la pose de l'instant du cluster, avant de corriger l'EKF.
+        # statistique (seuil chi² à 99 % pour deux mesures), à la pose de l'instant du cluster.
         # La distance mesurée est ramenée au centre du poteau (le lidar voit sa surface).
         accepted = rejected = 0
         mahals = []
@@ -327,13 +337,29 @@ class Localizer:
                 relocalized = True
         t5 = time.perf_counter()
 
+        # Latence complète : du premier timestamp du tour à la fin de la correction potentielle.
+        # t_start_ns est en epoch ns; perf_counter sert uniquement à gérer la fenêtre glissante.
+        e2e_ms = max(0.0, (time.time_ns() - rev.t_start_ns) / 1e6)
+        window_now = time.perf_counter()
         with self._lock:
+            self._e2e_samples.append((window_now, e2e_ms))
+            cutoff = window_now - 5.0
+            while self._e2e_samples and self._e2e_samples[0][0] < cutoff:
+                self._e2e_samples.popleft()
+            self._e2e_last_ms = e2e_ms
+            self._e2e_avg_5s_ms = (
+                sum(value for _, value in self._e2e_samples) / len(self._e2e_samples)
+                if self._e2e_samples else 0.0
+            )
             pose, std = self.ekf.pose, self.ekf.std
             lost = self.lost
+            e2e_avg_5s_ms = self._e2e_avg_5s_ms
             self.revs_processed += 1
         report = Report(
             rev.number, t_ref, len(rev.points), len(capped), len(clusters), res, pose, std,
-            (t5 - t0) * 1e3, clusters, points=in_field,
+            (t5 - t0) * 1e3, clusters=clusters,
+            acq_to_correction_ms=e2e_ms, acq_to_correction_avg_5s_ms=e2e_avg_5s_ms,
+            points=in_field,
             points_world_mm=points_world_mm, points_unverified=points_unverified,
             corrections_accepted=accepted, corrections_rejected=rejected, mahal=mahals,
             lost=lost, relocalized=relocalized,
