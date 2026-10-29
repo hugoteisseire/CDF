@@ -88,6 +88,10 @@ def associate_poles(ekf: PoseEKF, clusters: List[Cluster], t_ref_s: float,
         n_size_ok += 1
         # Pose à l'instant des points du cluster (à 1 m/s, 100 ms = 100 mm : bien plus que ±30 mm).
         st = ekf.state_at(c.t_ns / 1e9 - p.lidar_latency_s)
+        if st is None:
+            # Aucun historique ne permet d'associer ce cluster à une pose fiable.
+            n_clamped += 1
+            continue
         n_clamped += st.clamped
         meas_d = c.dist_mm + p.pole_radius_mm        # le lidar voit la surface : +rayon = centre
         for j in range(n_poles):
@@ -103,6 +107,13 @@ def associate_poles(ekf: PoseEKF, clusters: List[Cluster], t_ref_s: float,
             claimed.setdefault(e[0], []).append(j)
 
     ref = ekf.state_at(t_ref_s)
+    if ref is None:
+        # API défensive : sans état historique, aucun candidat ne peut être évalué.
+        return AssocResult(
+            [PoleMatch(j, "absent", 0, float("nan"), float("nan"), 0.0, 0.0)
+             for j in range(n_poles)],
+            len(clusters), n_size_ok, len(clusters), n_clamped + 1,
+        )
     matches = []
     for j in range(n_poles):
         lst = cands[j]
