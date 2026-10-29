@@ -293,7 +293,7 @@ class Localizer:
         t3 = time.perf_counter()
 
         # Étape 4 : correction séquentielle. Chaque mesure validée par l'association est soumise au gating
-        # statistique (seuil chi² configurable, désormais doublé), à la pose de l'instant du cluster.
+        # statistique (seuil chi² à 99 % pour deux mesures), à la pose de l'instant du cluster.
         # La distance mesurée est ramenée au centre du poteau (le lidar voit sa surface).
         accepted = rejected = 0
         mahals = []
