@@ -319,15 +319,17 @@ class Localizer:
                 history_end = self.ekf._ht[-1] if self.ekf._ht else None
                 tol_s = self.ekf.p.clamp_tol_s
                 latency_s = self.ekf.p.lidar_latency_s
-            rev_ref_s = (rev.t_start_ns + rev.t_end_ns) / 2e9 - latency_s
-            if history_end is not None and rev_ref_s > history_end + tol_s:
+            # Le point le plus récent du tour est sa fin : utiliser le milieu laisserait
+            # les derniers points hors historique alors que le tour semble acceptable.
+            rev_latest_measure_s = rev.t_end_ns / 1e9 - latency_s
+            if history_end is not None and rev_latest_measure_s > history_end + tol_s:
                 try:
                     self._q.put_nowait(rev)
                 except queue.Full:
                     # Ne pas perdre silencieusement le tour si un producteur utilise une
                     # file bornée : le prochain tour sera préféré au rattrapage.
                     self.revs_skipped += 1
-                delta_ms = (rev_ref_s - history_end) * 1000.0
+                delta_ms = (rev_latest_measure_s - history_end) * 1000.0
                 self._timestamp_waits += 1
                 self._timestamp_diag(
                     f"MESURE TROP RÉCENTE : tour {rev.number}, EKF en retard de {delta_ms:.1f} ms "
