@@ -518,11 +518,14 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
         panel_lines = [
             f"UI {displayed_fps:.1f} FPS | rapports reçus: {last_queue_items}",
             f"âge rapport: {report_age_ms:.0f} ms | localizer: {latest.odo_hz:.1f} odo Hz" if latest is not None else "En attente de rapport",
-            "Calcul par tour (ms): cap / clusters / association / total",
-            (f"{latest.timings_ms['cap_points']:.2f} / {latest.timings_ms['find_clusters']:.2f} / "
-             f"{latest.timings_ms['associate_poles']:.2f} / {latest.timings_ms['total']:.2f}") if latest is not None else "--",
-            (f"Acquisition → correction: {latest.acq_to_correction_ms:.0f} ms | moyenne 5 s: "
-             f"{latest.acq_to_correction_avg_5s_ms:.0f} ms") if latest is not None else "--",
+            "Calcul pur par tour (ms, hors acquisition):",
+            (f"cap {latest.timings_ms['cap_points']:.2f} | filtre terrain {latest.timings_ms['filter_points_in_field']:.2f} | "
+             f"clusters {latest.timings_ms['find_clusters']:.2f}") if latest is not None else "--",
+            (f"association {latest.timings_ms['associate_poles']:.2f} | corrections EKF {latest.timings_ms['correct']:.2f} | "
+             f"relocalisation {latest.timings_ms['relocalize']:.2f}") if latest is not None else "--",
+            (f"TOTAL CALCUL {latest.timings_ms['total']:.2f} ms") if latest is not None else "--",
+            (f"Latence depuis début du tour (inclut acquisition + file + calcul): {latest.acq_to_correction_ms:.0f} ms "
+             f"| moyenne 5 s: {latest.acq_to_correction_avg_5s_ms:.0f} ms") if latest is not None else "--",
             (f"corrections: {latest.corrections_accepted} ok / {latest.corrections_rejected} refusées | "
              + ("RELOCALISÉ" if latest.relocalized else "PERDU" if latest.lost
                 else "pose fiable" if latest.reliable else "pose peu fiable")) if latest is not None else "--",
@@ -532,11 +535,11 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
             avg_ms, max_ms = displayed_profile[name]
             panel_lines.append(f"{name:>6}: {avg_ms:6.2f} / {max_ms:6.2f}")
         panel_lines.append("tick(30) attend pour limiter les FPS; non inclus dans draw")
-        panel = pygame.Surface((430, 282), pygame.SRCALPHA)
+        panel = pygame.Surface((470, 330), pygame.SRCALPHA)
         panel.fill((255, 255, 255, 225))
         for i, text_line in enumerate(panel_lines):
             panel.blit(small.render(text_line, True, (20, 25, 32)), (8, 5 + i * 19))
-        screen.blit(panel, (0, 500))
+        screen.blit(panel, (0, 470))
 
         t0 = time.perf_counter()
         pygame.display.flip()
