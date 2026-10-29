@@ -94,7 +94,7 @@ class PoseEKF:
         self._odo_prev = None                     # dernier échantillon d'odométrie (x, y, θ, t)
         self._ht, self._hx, self._hP = [], [], []  # historique : instants, poses, covariances
         # _hC[i][j] = Cov(x_i, x_j), indispensable pour traiter une mesure retardée.
-        self._hC = []
+        self._hC = np.empty((0, 0, 3, 3), dtype=float)
 
     # ------------------------------------------------------------------ étape 1 : état
     def reset(self, x_mm, y_mm, theta_rad, t_s, pos_std_mm=None, theta_std_rad=None):
@@ -105,7 +105,7 @@ class PoseEKF:
         self.P = np.diag([sp * sp, sp * sp, st * st])
         self._odo_prev = None
         self._ht, self._hx, self._hP = [], [], []
-        self._hC = []
+        self._hC = np.empty((0, 0, 3, 3), dtype=float)
         self._record(t_s)
         self.ready = True
 
@@ -171,25 +171,28 @@ class PoseEKF:
         """
         if self._ht and t_s <= self._ht[-1]:       # même instant : remplace la dernière entrée
             self._hx[-1], self._hP[-1] = self.x.copy(), self.P.copy()
-            self._hC[-1][-1] = self.P.copy()
+            self._hC[-1, -1] = self.P.copy()
             return
         if not self._ht:
-            self._hC = [[self.P.copy()]]
+            self._hC = self.P.reshape((1, 1, 3, 3)).copy()
         else:
             F = np.eye(3) if transition_F is None else transition_F
-            cross = [row[-1] @ F.T for row in self._hC]  # Cov(x_i, x_n)
-            for i, row in enumerate(self._hC):
-                row.append(cross[i].copy())
-            new_row = [c.T.copy() for c in cross] + [self.P.copy()]
-            self._hC.append(new_row)
+            n = len(self._ht)
+            old = self._hC
+            cross = old[:, -1] @ F.T              # Cov(x_i, x_new), vectorisé sur i
+            expanded = np.empty((n + 1, n + 1, 3, 3), dtype=float)
+            expanded[:n, :n] = old
+            expanded[:n, n] = cross
+            expanded[n, :n] = cross.transpose(0, 2, 1)
+            expanded[n, n] = self.P
+            self._hC = expanded
         self._ht.append(t_s)
         self._hx.append(self.x.copy())
         self._hP.append(self.P.copy())
         k = bisect.bisect_left(self._ht, t_s - self.p.history_s) - 1   # garde 1 entrée avant la coupure
         if k > 0:
-            del self._ht[:k], self._hx[:k], self._hP[:k], self._hC[:k]
-            for row in self._hC:
-                del row[:k]
+            del self._ht[:k], self._hx[:k], self._hP[:k]
+            self._hC = self._hC[k:, k:].copy()
 
     def state_at(self, t_s) -> Optional[StateAt]:
         """Pose et incertitude à l'instant t_s (interpolées). Hors historique : on prend l'entrée la
@@ -207,7 +210,7 @@ class PoseEKF:
         w = (t_s - ts[i0]) / (ts[i1] - ts[i0])
         # Covariance de l'état interpolé, avec le terme croisé entre les deux échantillons.
         P0, P1 = self._hP[i0], self._hP[i1]
-        P01 = self._hC[i0][i1]
+        P01 = self._hC[i0, i1]
         P = ((1 - w) ** 2 * P0 + w ** 2 * P1
              + w * (1 - w) * (P01 + P01.T))
         P = (P + P.T) * 0.5
@@ -253,7 +256,7 @@ class PoseEKF:
 
         if t_s is None:
             x_ref, P_ref = self.x.copy(), self.P.copy()
-            cross_ref = [self._hC[i][-1].copy() for i in range(n)]
+            cross_ref = self._hC[:, -1].copy()
         else:
             st = self.state_at(t_s - self.p.lidar_latency_s)
             if st is None or st.clamped:
@@ -270,10 +273,7 @@ class PoseEKF:
                 i1 = bisect.bisect_right(ts, t_s - self.p.lidar_latency_s)
                 i0 = i1 - 1
                 w = ((t_s - self.p.lidar_latency_s - ts[i0]) / (ts[i1] - ts[i0]))
-            cross_ref = [
-                (1.0 - w) * self._hC[i][i0] + w * self._hC[i][i1]
-                for i in range(n)
-            ]
+            cross_ref = (1.0 - w) * self._hC[:, i0] + w * self._hC[:, i1]
 
         expected_dist, expected_angle_deg, H = self.measurement(x_ref, pole_index)
         innovation = np.array([
@@ -291,7 +291,7 @@ class PoseEKF:
             return False, mahal
 
         # Gain différent pour chaque instant : K_i = Cov(x_i, x_ref) H' S^-1.
-        gains = [C @ H.T @ S_inv for C in cross_ref]
+        gains = cross_ref @ H.T @ S_inv             # (N, 3, 2)
         dx_now = gains[-1] @ innovation
         correction_pos_mm = math.hypot(float(dx_now[0]), float(dx_now[1]))
         correction_theta_deg = abs(math.degrees(float(dx_now[2])))
@@ -300,20 +300,16 @@ class PoseEKF:
             return False, mahal
 
         # Mise à jour de tous les états historiques avec leur gain propre.
-        for i, Ki in enumerate(gains):
-            self._hx[i] += Ki @ innovation
+        dx_history = gains @ innovation
+        self._hx = [x + dx for x, dx in zip(self._hx, dx_history)]
 
-        # Mise à jour conditionnelle complète : P_ij+ = P_ij - K_i H Cov(x_ref, x_j).
-        # On ne remplace pas simplement la dernière covariance : les états historiques restent cohérents.
-        for i in range(n):
-            for j in range(i, n):
-                updated = self._hC[i][j] - gains[i] @ H @ cross_ref[j].T
-                if i == j:
-                    updated = (updated + updated.T) * 0.5
-                self._hC[i][j] = updated
-                self._hC[j][i] = updated.T.copy() if i != j else updated.copy()
-        for i in range(n):
-            self._hP[i] = self._hC[i][i].copy()
+        # Mise à jour conditionnelle complète, vectorisée : P_ij+ = P_ij - K_i H Cov(x_ref, x_j).
+        # Le tenseur contient toutes les covariances croisées; la symétrisation limite les erreurs d'arrondi.
+        kh = gains @ H
+        cov_ref_j = cross_ref.transpose(0, 2, 1)
+        self._hC -= np.einsum("iab,jbc->ijac", kh, cov_ref_j, optimize=True)
+        self._hC = 0.5 * (self._hC + self._hC.transpose(1, 0, 3, 2))
+        self._hP = [self._hC[i, i].copy() for i in range(n)]
 
         self.x = self._hx[-1].copy()
         self.P = self._hP[-1].copy()
