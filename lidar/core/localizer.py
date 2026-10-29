@@ -269,10 +269,32 @@ class Localizer:
                 rev = self._q.get_nowait()
             except queue.Empty:
                 return
+
             if not self.ekf.ready:
                 # Pas encore d'odométrie : sans pose de départ, on ne peut pas dire où chercher les poteaux.
                 self.revs_skipped += 1
                 continue
+
+            # Si le tour est déjà plus ancien que l'historique EKF, le traiter ne peut
+            # produire aucune correction utile. Vider alors la file et ne garder que le
+            # tour le plus récent pour rattraper le retard au lieu de traiter des tours périmés.
+            with self._lock:
+                history_start = self.ekf._ht[0] if self.ekf._ht else None
+                stale_limit_s = self.ekf.p.clamp_tol_s
+            rev_end_s = rev.t_end_ns / 1e9
+            if history_start is not None and rev_end_s < history_start - stale_limit_s:
+                newest = rev
+                dropped = 0
+                while True:
+                    try:
+                        newest = self._q.get_nowait()
+                        dropped += 1
+                    except queue.Empty:
+                        break
+                if dropped:
+                    self.revs_skipped += dropped
+                rev = newest
+
             self._process_one(rev)
 
     def _process_one(self, rev):
