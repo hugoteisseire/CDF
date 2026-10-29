@@ -57,8 +57,8 @@ La détection visuelle d'un cluster ne garantit pas qu'il soit associé ni accep
 Le fait que le robot soit à l'arrêt ne devrait pas, à lui seul, empêcher une correction : la décision dépend de l'association, du gating et des limites de correction, pas de la vitesse du robot.
 
 
-## Ajustements de seuil et métrique de latence
+## Garde-fous de correction et métrique de latence
 
-- Le seuil de rejet chi² est passé de **9,21 à 18,42** (facteur 2). Il s'agit d'un filtre anti-aberrations moins restrictif; les garde-fous de déplacement maximal par correction restent actifs.
+- Le seuil chi² reste à **9,21** (99 % pour deux mesures). Les limites de déplacement par correction sont doublées : **100 mm** en translation et **6°** en rotation, configurables via `max_correction_pos_mm` et `max_correction_theta_deg`.
 - `Report.acq_to_correction_ms` mesure la durée de bout en bout depuis le timestamp du premier point du tour (`rev.t_start_ns`) jusqu'à la fin du traitement et des corrections potentielles. Elle inclut donc la durée du tour lidar, l'attente éventuelle dans la file et le traitement logiciel. Elle est distincte de `proc_ms`, qui mesure seulement le temps de calcul.
-- `Report.acq_to_correction_avg_5s_ms` est la moyenne glissante des durées de bout en bout des tours terminés au cours des cinq dernières secondes. Les deux métriques sont disponibles dans `Localizer.status()` et sont ajoutées au journal CSV (`acq_to_correction_ms`, `acq_to_correction_avg_5s_ms`).
+- `Report.acq_to_correction_avg_5s_ms` est la moyenne glissante des durées de bout en bout des tours terminés au cours des cinq dernières secondes. Les deux métriques sont disponibles dans `Localizer.status()`, dans le journal CSV (`acq_to_correction_ms`, `acq_to_correction_avg_5s_ms`) et dans le panneau de la visualisation Pygame de `tests/test_fusion.py`.
