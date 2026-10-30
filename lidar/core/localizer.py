@@ -159,6 +159,9 @@ class Localizer:
         self.error = None
         self._last_timestamp_diag = 0.0
         self._timestamp_waits = 0
+        # Tour temporairement trop récent pour l'historique EKF : conservé
+        # séparément afin de le retraiter avant les tours arrivés ensuite.
+        self._pending_rev = None
         # perte / relocalisation
         self.lost = False
         self.relocalizations = 0
@@ -297,10 +300,16 @@ class Localizer:
             # Garder l'historique EKF aussi récent que possible, même si plusieurs tours
             # lidar attendent dans la file.
             self._poll_odometry()
-            try:
-                rev = self._q.get_nowait()
-            except queue.Empty:
-                return
+            # Un tour remis en attente temporelle reste prioritaire : ne pas le
+            # réinsérer dans la FIFO, sinon les tours suivants peuvent le dépasser.
+            if self._pending_rev is not None:
+                rev = self._pending_rev
+                self._pending_rev = None
+            else:
+                try:
+                    rev = self._q.get_nowait()
+                except queue.Empty:
+                    return
 
             if not self.ekf.ready:
                 # Pas encore d'odométrie : sans pose de départ, on ne peut pas dire où chercher les poteaux.
@@ -342,8 +351,8 @@ class Localizer:
 
             # Ne pas traiter une mesure dont l'instant est encore dans le futur par rapport
             # à l'historique EKF : state_at() la bornerait au dernier état, et correct_pole()
-            # finirait par refuser la correction. On la remet en tête logique de la file
-            # (file FIFO non bornée attendue) et on laisse la boucle principale repoller l'odo.
+            # finirait par refuser la correction. La conserver séparément garantit qu'elle
+            # sera retraitée avant tout tour plus récent, après le prochain polling odométrique.
             with self._lock:
                 history_end = self.ekf._ht[-1] if self.ekf._ht else None
                 tol_s = self.ekf.p.clamp_tol_s
@@ -352,12 +361,7 @@ class Localizer:
             # les derniers points hors historique alors que le tour semble acceptable.
             rev_latest_measure_s = rev.t_end_ns / 1e9 - latency_s
             if history_end is not None and rev_latest_measure_s > history_end + tol_s:
-                try:
-                    self._q.put_nowait(rev)
-                except queue.Full:
-                    # Ne pas perdre silencieusement le tour si un producteur utilise une
-                    # file bornée : le prochain tour sera préféré au rattrapage.
-                    self.revs_skipped += 1
+                self._pending_rev = rev
                 delta_ms = (rev_latest_measure_s - history_end) * 1000.0
                 self._timestamp_waits += 1
                 self._timestamp_diag(
