@@ -7,6 +7,7 @@ import math
 import time
 import can
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 from dataclasses import dataclass
 from mks_servo_can import MksServo
@@ -898,24 +899,31 @@ class MotorGroup:
         self._poll_thread = None
 
     def _poll_loop(self, period: float) -> None:
-        nxt = time.perf_counter()
-        while not self._poll_stop.is_set():
-            for m in self.motors:
-                try:
-                    m.read_position(timeout=min(0.01, period))
-                except Exception as e:
-                    print(f"⚠️ Poller moteur {m.can_id} : {e}")
-            if self.on_round is not None:
-                try:
-                    self.on_round([m.position_sample for m in self.motors])
-                except Exception as e:
-                    print(f"⚠️ Poller : erreur dans on_round : {e}")
-            nxt += period
-            delay = nxt - time.perf_counter()
-            if delay > 0:
-                self._poll_stop.wait(delay)
-            else:
-                nxt = time.perf_counter()        # en retard : on se recale
+        # Les réponses des trois moteurs sont indépendantes (IDs CAN distincts).
+        # Les lire séquentiellement cumule jusqu'à 3 timeouts de 10 ms et plafonne
+        # mécaniquement la cadence autour de 30-40 Hz. Chaque moteur possède son
+        # BufferedReader ; on peut donc attendre les trois réponses en parallèle.
+        with ThreadPoolExecutor(max_workers=len(self.motors), thread_name_prefix="motor-read") as pool:
+            nxt = time.perf_counter()
+            while not self._poll_stop.is_set():
+                futures = [pool.submit(m.read_position, timeout=min(0.01, period))
+                           for m in self.motors]
+                for m, future in zip(self.motors, futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"⚠️ Poller moteur {m.can_id} : {e}")
+                if self.on_round is not None:
+                    try:
+                        self.on_round([m.position_sample for m in self.motors])
+                    except Exception as e:
+                        print(f"⚠️ Poller : erreur dans on_round : {e}")
+                nxt += period
+                delay = nxt - time.perf_counter()
+                if delay > 0:
+                    self._poll_stop.wait(delay)
+                else:
+                    nxt = time.perf_counter()        # en retard : on se recale
 
     def wheel_positions(self) -> list[Optional[tuple]]:
         """Dernières (pulses, timestamp) de chaque roue (None si pas encore lu)."""
