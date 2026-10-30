@@ -1,7 +1,7 @@
 """Programme robot réel : pilotage moteur, acquisition lidar et localisation EKF.
 
 Lancement depuis la racine du dépôt :
-    python -m lidar.tests.test_fusion --x0 1000 --y0 1000 --theta0-deg 0
+    python -m lidar.tests.robot_fusion --x0 1000 --y0 1000 --theta0-deg 0
 
 Le programme remplace viz_table/example_robot.py : il expose le même serveur
 RobotProtocolServer à la stratégie, mais applique les commandes aux moteurs réels.
@@ -143,6 +143,8 @@ class RobotController:
                 self.target = None
                 self.target_theta = None
                 self._velocity = (cmd["vx"], cmd["vy"], cmd["omega"], cmd["frame"])
+                self.motion_status = "running"
+                self.motion_error = None
         elif kind == "cmd.goto":
             self.goto(cmd["x"], cmd["y"], cmd["speed"], cmd["acc"], cmd.get("theta"))
 
