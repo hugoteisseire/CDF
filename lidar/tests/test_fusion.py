@@ -103,9 +103,13 @@ class RobotController:
             dtheta = 0.0 if cmd.get("theta") is None else _wrap_rad(math.radians(cmd["theta"]) - theta)
             if distance > 1.0 or abs(dtheta) > math.radians(0.5):
                 angle = math.atan2(dy, dx) if distance > 1.0 else 0.0
+                # Le protocole exprime l'accélération en mm/s² ; le contrôleur
+                # MKS attend son paramètre de rampe 1..255.
+                pulses_acc = cmd["acc"] * self.base.motors[0].pulses_per_mm
+                ramp_acc = max(1, min(255, Motor.linear_to_acc(pulses_acc)))
                 ok = self.base.move_direction(
                     distance, angle, speed_mm_s=min(cmd["speed"], self.base.max_speed_mm_s),
-                    dtheta=dtheta, wait=False, verbose=False,
+                    dtheta=dtheta, ramp_acc=ramp_acc, wait=False, verbose=False,
                 )
                 if not ok:
                     raise RuntimeError("La commande de déplacement n'a pas pu être lancée")
