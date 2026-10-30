@@ -17,7 +17,10 @@ import time
 from pathlib import Path
 from typing import Callable
 
-SOCKET_PATH = os.environ.get("CDF_ROBOT_SOCKET", "/tmp/cdf_robot.sock")
+SOCKET_PATH = os.environ.get(
+    "CDF_ROBOT_SOCKET",
+    str(Path(os.environ.get("TEMP", "/tmp")) / "cdf_robot.sock"),
+)
 PROTOCOL_VERSION = 1
 STATE_PERIOD = 0.020  # 50 Hz
 MAX_FRAME_BYTES = 64 * 1024
