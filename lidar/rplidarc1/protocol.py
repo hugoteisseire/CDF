@@ -257,7 +257,11 @@ class Response:
                 continue
             else:
                 byte_error_handling = False
-            t_rx_ns = time.monotonic_ns()
+            # Horodatage epoch pris immédiatement après réception de la trame.
+            # Ne pas utiliser monotonic_ns ici : ClockAligner serait initialisé plus tard
+            # par le thread de découpage, après accumulation possible d'une file de points,
+            # ce qui décalerait artificiellement les mesures dans le futur.
+            t_rx_ns = time.time_ns()
             parsed_tuple = Response._parse_simple_scan_result(data_out_buffer)
             if parsed_tuple is None:
                 continue
