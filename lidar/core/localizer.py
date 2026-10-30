@@ -91,7 +91,9 @@ def _filter_points_in_field(points, ekf: PoseEKF):
 
 LOG_COLUMNS = ("t_s", "rev", "x_mm", "y_mm", "theta_deg", "sigma_x_mm", "sigma_y_mm", "sigma_theta_deg",
                "n_clusters", "n_matched", "corr_accepted", "corr_rejected", "mahal_mean",
-               "lost", "relocalized", "reliable", "queue_wait_ms", "ekf_predict_ms", "proc_ms",\n               "cap_ms", "filter_ms", "clusters_ms", "association_ms", "correction_ms",\n               "acq_to_correction_ms", "acq_to_correction_avg_5s_ms")
+               "lost", "relocalized", "reliable", "queue_wait_ms", "ekf_predict_ms", "proc_ms",
+               "cap_ms", "filter_ms", "clusters_ms", "association_ms", "correction_ms",
+               "acq_to_correction_ms", "acq_to_correction_avg_5s_ms")
 
 
 @dataclass
@@ -106,7 +108,9 @@ class Report:
     std: tuple                 # (σx mm, σy mm, σθ °)
     proc_ms: float             # temps de calcul pur du tour (doit rester << 100 ms)
     acq_to_correction_ms: float = 0.0       # du premier point du tour à la fin des corrections
-    acq_to_correction_avg_5s_ms: float = 0.0  # moyenne glissante sur les 5 dernières secondes\n    queue_wait_ms: float = 0.0              # fin du tour -> début du traitement\n    ekf_predict_ms: float = 0.0             # temps cumulé des prédictions odométriques depuis le tour précédent
+    acq_to_correction_avg_5s_ms: float = 0.0  # moyenne glissante sur les 5 dernières secondes
+    queue_wait_ms: float = 0.0              # fin du tour -> début du traitement
+    ekf_predict_ms: float = 0.0             # temps cumulé des prédictions odométriques depuis le tour précédent
     clusters: list = field(default_factory=list)   # clusters du tour (diagnostic : où le lidar voit des objets)
     corrections_accepted: int = 0
     corrections_rejected: int = 0                  # refusées par le gating statistique
@@ -225,7 +229,13 @@ class Localizer:
                                   f"{r.std[0]:.2f}", f"{r.std[1]:.2f}", f"{r.std[2]:.3f}",
                                   r.n_clusters, n_matched, r.corrections_accepted, r.corrections_rejected,
                                   f"{mahal_mean:.3f}" if mahal_mean != "" else "",
-                                  int(r.lost), int(r.relocalized), int(r.reliable), f"{r.proc_ms:.2f}",
+                                  int(r.lost), int(r.relocalized), int(r.reliable),
+                                  f"{r.queue_wait_ms:.2f}", f"{r.ekf_predict_ms:.2f}", f"{r.proc_ms:.2f}",
+                                  f"{r.timings_ms.get('cap_points', 0.0):.2f}",
+                                  f"{r.timings_ms.get('filter_points_in_field', 0.0):.2f}",
+                                  f"{r.timings_ms.get('find_clusters', 0.0):.2f}",
+                                  f"{r.timings_ms.get('associate_poles', 0.0):.2f}",
+                                  f"{r.timings_ms.get('correct', 0.0):.2f}",
                                   f"{r.acq_to_correction_ms:.2f}", f"{r.acq_to_correction_avg_5s_ms:.2f}"])
             self._log_f.flush()
         except OSError as e:
@@ -447,7 +457,8 @@ class Localizer:
         report = Report(
             rev.number, t_ref, len(rev.points), len(capped), len(clusters), res, pose, std,
             (t5 - t0) * 1e3, clusters=clusters,
-            acq_to_correction_ms=e2e_ms, acq_to_correction_avg_5s_ms=e2e_avg_5s_ms,\n            queue_wait_ms=queue_wait_ms, ekf_predict_ms=ekf_predict_ms,
+            acq_to_correction_ms=e2e_ms, acq_to_correction_avg_5s_ms=e2e_avg_5s_ms,
+            queue_wait_ms=queue_wait_ms, ekf_predict_ms=ekf_predict_ms,
             points=in_field,
             points_world_mm=points_world_mm, points_unverified=points_unverified,
             corrections_accepted=accepted, corrections_rejected=rejected, mahal=mahals,
