@@ -247,7 +247,6 @@ def main():
         )
 
         next_tick = time.monotonic()
-        last_lidar_stats = next_tick
         while not stop_event.is_set():
             while True:
                 event = server.poll(timeout=0.0)
@@ -266,15 +265,6 @@ def main():
                 raise RuntimeError(f"Erreur localizer: {loc.error!r}")
             if acq.error is not None:
                 raise RuntimeError(f"Erreur acquisition lidar: {acq.error!r}")
-            now = time.monotonic()
-            if now - last_lidar_stats >= 1.0:
-                stats = acq.snapshot()
-                print(
-                    f"Lidar {stats['freq_hz']:.1f} tr/s | {stats['pts_per_s']:.0f} pts/s | "
-                    f"rejets {stats['revs_rejected']} | perdus {stats['revs_dropped']}",
-                    flush=True,
-                )
-                last_lidar_stats = now
             next_tick += 1.0 / CONTROL_HZ
             time.sleep(max(0.0, next_tick - time.monotonic()))
 
