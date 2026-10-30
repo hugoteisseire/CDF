@@ -730,7 +730,8 @@ def main():
                           f"perdus {s['revs_dropped']} | erreurs lib {s['lib_errors']} | rejets {s['reject_reasons'] or '-'} | "
                           f"trou max {s['max_gap_ms']:3.0f} ms" + (f" | cpu lidar {s['cpu_pct']:3.0f} %" if 'cpu_pct' in s else ""))
             
-                print(f"Erreur du thread de fusion : {loc.error}")
+                if loc.error is not None:
+                    print(f"Erreur du thread de fusion : {loc.error!r}", flush=True)
                 
                 if args.drive:
                             from base_holo.tests.test_odometry import check_pose
