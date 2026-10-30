@@ -25,6 +25,7 @@ from lidar.core.lidar_process import LidarProcess
 from lidar.core.localizer import Localizer
 from lidar.core.pole_association import AssocParams
 from viz_table.robot_protocol import RobotProtocolServer
+from viz_table.viz_client import Viz
 
 
 GEAR_RATIO = 48 / 15
@@ -63,6 +64,15 @@ class RobotController:
         self._velocity = (0.0, 0.0, 0.0, "robot")
         self._lock = threading.Lock()
         self._last_state_sample = None
+        self._last_fusion = {
+            "ready": False, "reliable": False, "lost": False,
+            "std_x": None, "std_y": None, "std_theta": None,
+            "revs_processed": 0, "revs_skipped": 0,
+            "acq_to_correction_ms": None,
+            "acq_to_correction_avg_5s_ms": None, "poles": [],
+        }
+        self.motion_status = "idle"
+        self.motion_error = None
 
     def stop(self):
         self.base.stop(255)
@@ -71,6 +81,44 @@ class RobotController:
             self.target = None
             self.target_theta = None
             self._velocity = (0.0, 0.0, 0.0, "robot")
+            self.motion_status = "stopped"
+            self.motion_error = None
+
+    def goto(self, x: float, y: float, speed_mm_s: float, acc_mm_s2: float,
+             theta_deg=None):
+        """Lance un goto commun aux commandes stratégie et visualiseur."""
+        self.stop()
+        px, py, current_theta = self.localizer.status()["pose"]
+        dx, dy = x - px, y - py
+        distance = math.hypot(dx, dy)
+        dtheta = (0.0 if theta_deg is None else
+                  _wrap_rad(math.radians(theta_deg) - current_theta))
+        if distance <= 1.0 and abs(dtheta) <= math.radians(0.5):
+            with self._lock:
+                self.motion_status = "reached"
+            return
+        angle = math.atan2(dy, dx) if distance > 1.0 else 0.0
+        pulses_acc = acc_mm_s2 * self.base.motors[0].pulses_per_mm
+        ramp_acc = max(1, min(255, Motor.linear_to_acc(pulses_acc)))
+        try:
+            ok = self.base.move_direction(
+                distance, angle,
+                speed_mm_s=min(speed_mm_s, self.base.max_speed_mm_s),
+                dtheta=dtheta, ramp_acc=ramp_acc, wait=False, verbose=False,
+            )
+            if not ok:
+                raise RuntimeError("La commande de déplacement n'a pas pu être lancée")
+        except Exception as exc:
+            with self._lock:
+                self.motion_status = "error"
+                self.motion_error = str(exc)
+            raise
+        with self._lock:
+            self.mode = "goto"
+            self.target = (x, y)
+            self.target_theta = theta_deg
+            self.motion_status = "running"
+            self.motion_error = None
 
     def apply(self, cmd: dict):
         kind = cmd["type"]
@@ -96,27 +144,7 @@ class RobotController:
                 self.target_theta = None
                 self._velocity = (cmd["vx"], cmd["vy"], cmd["omega"], cmd["frame"])
         elif kind == "cmd.goto":
-            self.stop()
-            x, y, theta = self.localizer.status()["pose"]
-            dx, dy = cmd["x"] - x, cmd["y"] - y
-            distance = math.hypot(dx, dy)
-            dtheta = 0.0 if cmd.get("theta") is None else _wrap_rad(math.radians(cmd["theta"]) - theta)
-            if distance > 1.0 or abs(dtheta) > math.radians(0.5):
-                angle = math.atan2(dy, dx) if distance > 1.0 else 0.0
-                # Le protocole exprime l'accélération en mm/s² ; le contrôleur
-                # MKS attend son paramètre de rampe 1..255.
-                pulses_acc = cmd["acc"] * self.base.motors[0].pulses_per_mm
-                ramp_acc = max(1, min(255, Motor.linear_to_acc(pulses_acc)))
-                ok = self.base.move_direction(
-                    distance, angle, speed_mm_s=min(cmd["speed"], self.base.max_speed_mm_s),
-                    dtheta=dtheta, ramp_acc=ramp_acc, wait=False, verbose=False,
-                )
-                if not ok:
-                    raise RuntimeError("La commande de déplacement n'a pas pu être lancée")
-                with self._lock:
-                    self.mode = "goto"
-                    self.target = (cmd["x"], cmd["y"])
-                    self.target_theta = cmd.get("theta")
+            self.goto(cmd["x"], cmd["y"], cmd["speed"], cmd["acc"], cmd.get("theta"))
 
     def tick(self):
         with self._lock:
@@ -135,6 +163,35 @@ class RobotController:
                     self.mode = "idle"
                     self.target = None
                     self.target_theta = None
+                    self.motion_status = "reached"
+                    self.motion_error = None
+
+    def update_fusion_report(self, report):
+        """Conserve les diagnostics du dernier tour lidar pour les deux interfaces."""
+        matches = []
+        for match in report.result.matches:
+            matches.append({
+                "pole": match.pole + 1,
+                "status": match.status,
+                "distance_mm": match.cluster.dist_mm if match.cluster else None,
+                "angle_deg": match.cluster.angle_deg if match.cluster else None,
+            })
+        status = self.localizer.status()
+        sx, sy, st = status["std"]
+        with self._lock:
+            self._last_fusion = {
+                "ready": status["ready"], "reliable": status["reliable"],
+                "lost": status["lost"], "std_x": sx, "std_y": sy,
+                "std_theta": math.degrees(st),
+                "revs_processed": status["revs_processed"],
+                "revs_skipped": status["revs_skipped"],
+                "acq_to_correction_ms": status["acq_to_correction_ms"],
+                "acq_to_correction_avg_5s_ms": status["acq_to_correction_avg_5s_ms"],
+                "poles": matches, "processing_ms": report.proc_ms,
+                "ekf_ms": report.timings_ms.get("ekf_total", report.timings_ms.get("correct", 0.0)),
+                "corrections_accepted": report.corrections_accepted,
+                "corrections_rejected": report.corrections_rejected,
+            }
 
     def state(self):
         status = self.localizer.status()
@@ -154,11 +211,13 @@ class RobotController:
             "robot": {"x": x, "y": y, "theta": math.degrees(theta),
                       "vx": vx, "vy": vy, "omega": omega},
             "opponent": {"valid": False},
-            "motion": {"mode": mode,
+            "motion": {"mode": mode, "status": self.motion_status,
+                       "error": self.motion_error,
                        "target_x": target[0] if target else None,
                        "target_y": target[1] if target else None,
                        "target_theta": target_theta,
                        "moving": mode != "idle"},
+            "fusion": dict(self._last_fusion),
         }
 
 
@@ -222,7 +281,11 @@ def main():
             window_scale=args.win_scale,
         )
 
+        controller = None
+
         def on_report(report):
+            if controller is not None:
+                controller.update_fusion_report(report)
             ekf_ms = report.timings_ms.get("ekf_total", report.timings_ms.get("correct", 0.0))
             print(
                 f"Tour {report.rev_number:5d} | {_format_poles(report)} | "
@@ -237,12 +300,19 @@ def main():
         )
         loc.start()
         controller = RobotController(base, loc)
+        viz = Viz("robot")
+        viz.on("goto", lambda args: controller.goto(
+            float(args["x"]), float(args["y"]),
+            float(args.get("speed", 300.0)), float(args.get("acc", 500.0)),
+            args.get("theta"),
+        ))
+        viz.on("estop", lambda args: controller.stop())
         server_kwargs = {} if args.socket is None else {"path": args.socket}
         server = RobotProtocolServer(controller.state, **server_kwargs).start()
 
         print(
             f"Robot prêt | pose initiale ({args.x0:.0f}, {args.y0:.0f}, "
-            f"{args.theta0_deg:.1f}°) | protocole stratégie actif",
+            f"{args.theta0_deg:.1f}°) | stratégie + visualiseur actifs",
             flush=True,
         )
 
@@ -261,6 +331,27 @@ def main():
                     controller.apply(event)
 
             controller.tick()
+
+            # Même snapshot fusionné envoyé à la stratégie (socket) et au visualiseur (WebSocket).
+            snapshot = controller.state()
+            robot_state = snapshot["robot"]
+            motion_state = snapshot["motion"]
+            fusion_state = snapshot["fusion"]
+            viz.send("robot", {
+                **robot_state,
+                "radius": base.robot.radius,
+                "target": ({"x": motion_state["target_x"], "y": motion_state["target_y"]}
+                           if motion_state["target_x"] is not None else None),
+                "mode": motion_state["mode"], "moving": motion_state["moving"],
+                "motion_status": motion_state["status"],
+                "motion_error": motion_state["error"],
+                "reliable": fusion_state["reliable"], "lost": fusion_state["lost"],
+                "std": {"x": fusion_state["std_x"], "y": fusion_state["std_y"],
+                        "theta": fusion_state["std_theta"]},
+            })
+            viz.send("opponent", snapshot["opponent"])
+            viz.send("fusion", fusion_state)
+
             if loc.error is not None:
                 raise RuntimeError(f"Erreur localizer: {loc.error!r}")
             if acq.error is not None:
