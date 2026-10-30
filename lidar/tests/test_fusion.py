@@ -222,35 +222,50 @@ def points_angle_dist(pts):
     return ang[ok], dist[ok]
 
 
-OPPONENT_IGNORE_ZONE = (0.0, 500.0, 800.0, 1500.0)  # xmin, xmax, ymin, ymax (mm)
+OPPONENT_BEACON_DIAMETER_MM = 100.0
+OPPONENT_BEACON_WIDTH_MIN_MM = 0.0
+OPPONENT_BEACON_WIDTH_MAX_MM = 250.0
+OPPONENT_BEACON_MIN_POINTS = 2
 
 
 def find_opponent_cluster(clusters, pose, matched_poles, pole_radius_mm=50.0,
                           lidar_offset_mm=(0.0, 0.0), lidar_zero_deg=0.0):
-    """Retourne (position, dans_zone, cluster) pour le robot adverse."""
+    """Détecte la balise adverse (Ø100 mm), avec une largeur de cluster admise de 0 à 250 mm.
+
+    La distance lidar est mesurée jusqu'à la surface de la balise : on ajoute son rayon
+    pour obtenir le centre. Retourne (position_terrain, cluster) ou None si rien de crédible.
+    """
     x, y, theta = pose
     ox, oy = lidar_offset_mm
     lidar_x = x + ox * math.cos(theta) - oy * math.sin(theta)
     lidar_y = y + ox * math.sin(theta) + oy * math.cos(theta)
-    xmin, xmax, ymin, ymax = OPPONENT_IGNORE_ZONE
-    matched_ids = {id(m.cluster) for m in matched_poles if m.cluster is not None}
+    matched_ids = {id(match.cluster) for match in matched_poles if match.cluster is not None}
     candidates = []
+
     for cluster in clusters:
         if id(cluster) in matched_ids:
             continue
-        # Exclut les clusters de taille compatible avec les poteaux de 100 mm.
-        if 15.0 <= cluster.width_mm <= 150.0 and cluster.n_points >= 2:
+        width = float(cluster.width_mm)
+        if not (OPPONENT_BEACON_WIDTH_MIN_MM <= width <= OPPONENT_BEACON_WIDTH_MAX_MM):
             continue
+        if cluster.n_points < OPPONENT_BEACON_MIN_POINTS:
+            continue
+
         angle = theta + math.radians(lidar_zero_deg - cluster.angle_deg)
-        px = lidar_x + cluster.dist_mm * math.cos(angle)
-        py = lidar_y + cluster.dist_mm * math.sin(angle)
-        if not (xmin <= px <= xmax and ymin <= py <= ymax):
-            candidates.append((cluster.width_mm, cluster.n_points, (px, py), cluster))
-    if candidates:
-        _, _, position, cluster = max(candidates, key=lambda item: (item[0], item[1]))
-        return position, False, cluster
-    # Aucun cluster candidat hors zone : adversaire supposé dans la zone, au centre.
-    return ((xmin + xmax) / 2.0, (ymin + ymax) / 2.0), True, None
+        center_dist = cluster.dist_mm + OPPONENT_BEACON_DIAMETER_MM / 2.0
+        px = lidar_x + center_dist * math.cos(angle)
+        py = lidar_y + center_dist * math.sin(angle)
+
+        # La largeur attendue est proche de 100 mm ; le nombre de points départage
+        # les candidats de qualité géométrique comparable.
+        score = (abs(width - OPPONENT_BEACON_DIAMETER_MM), -cluster.n_points)
+        candidates.append((score, (px, py), cluster))
+
+    if not candidates:
+        return None
+
+    _, position, cluster = min(candidates, key=lambda item: item[0])
+    return position, cluster
 
 
 def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=(0.0, 0.0),
@@ -378,15 +393,7 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
 
         # Poteaux théoriques fixes du modèle.
         # Zone d'exclusion toujours visible.
-        zone_xmin, zone_xmax, zone_ymin, zone_ymax = OPPONENT_IGNORE_ZONE
-        zone_top_left = xy((zone_xmin, zone_ymax))
-        zone_bottom_right = xy((zone_xmax, zone_ymin))
-        zone_rect = pygame.Rect(zone_top_left[0], zone_top_left[1],
-                                zone_bottom_right[0] - zone_top_left[0],
-                                zone_bottom_right[1] - zone_top_left[1])
-        pygame.draw.rect(screen, (245, 190, 55), zone_rect, 2)
-        screen.blit(small.render("Zone adverse si aucun cluster hors zone", True, (155, 105, 15)),
-                    (zone_rect.x + 4, zone_rect.y + 4))
+        
 
         for i, pole in enumerate(poles_mm):
             px, py = xy(pole)
@@ -452,28 +459,31 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
                     pygame.draw.line(screen, (210, 45, 65), (xy(real)[0], xy(real)[1] - 5),
                                      (xy(real)[0], xy(real)[1] + 5), 2)
 
-            # Adversaire : cluster hors zone, sinon centre de la zone d'exclusion.
-            opponent_xy, opponent_in_zone, _ = find_opponent_cluster(
+            # Balise adverse : uniquement lorsqu'un cluster correspond aux critères.
+            opponent = find_opponent_cluster(
                 latest.clusters, latest.pose, latest.result.matches, pole_radius_mm,
                 lidar_offset_mm, lidar_zero_deg,
             )
-            opponent_screen = xy(opponent_xy)
-            opponent_color = (230, 120, 20) if opponent_in_zone else (180, 35, 145)
-            pygame.draw.circle(screen, opponent_color, opponent_screen, max(8, int(65 * scale)), 3)
-            pygame.draw.line(screen, opponent_color, (opponent_screen[0] - 8, opponent_screen[1]),
-                             (opponent_screen[0] + 8, opponent_screen[1]), 2)
-            pygame.draw.line(screen, opponent_color, (opponent_screen[0], opponent_screen[1] - 8),
-                             (opponent_screen[0], opponent_screen[1] + 8), 2)
-            label = ("Adversaire supposé dans la zone" if opponent_in_zone else
-                     f"Adversaire détecté ({opponent_xy[0]:.0f}, {opponent_xy[1]:.0f}) mm")
-            screen.blit(small.render(label, True, opponent_color),
-                        (opponent_screen[0] + 10, opponent_screen[1] + 8))
+            if opponent is not None:
+                opponent_xy, opponent_cluster = opponent
+                opponent_screen = xy(opponent_xy)
+                opponent_color = (180, 35, 145)
+                pygame.draw.circle(screen, opponent_color, opponent_screen,
+                                   max(8, int((OPPONENT_BEACON_DIAMETER_MM / 2) * scale)), 3)
+                pygame.draw.line(screen, opponent_color, (opponent_screen[0] - 8, opponent_screen[1]),
+                                 (opponent_screen[0] + 8, opponent_screen[1]), 2)
+                pygame.draw.line(screen, opponent_color, (opponent_screen[0], opponent_screen[1] - 8),
+                                 (opponent_screen[0], opponent_screen[1] + 8), 2)
+                label = (f"Balise adverse ({opponent_xy[0]:.0f}, {opponent_xy[1]:.0f}) mm "
+                         f"| largeur {opponent_cluster.width_mm:.0f} mm")
+                screen.blit(small.render(label, True, opponent_color),
+                            (opponent_screen[0] + 10, opponent_screen[1] + 8))
 
             # Légende et état d'association.
             legend = [((35, 105, 210), "Poteau théorique"), ((120, 125, 135), "Axe attendu / recherche"),
                       ((220, 145, 30), "Fenêtre de recherche"), ((210, 45, 65), "Position réellement détectée"),
                       ((30, 160, 85), "Poteau associé"), ((180, 35, 145), "Adversaire détecté"),
-                      ((230, 120, 20), "Adversaire supposé dans la zone")]
+                      ((180, 35, 145), "Balise adverse détectée")]
             yy = 42
             for color, label in legend:
                 pygame.draw.line(screen, color, (16, yy + 7), (42, yy + 7), 3)
