@@ -62,6 +62,7 @@ class RobotController:
         self.target_theta = None
         self._velocity = (0.0, 0.0, 0.0, "robot")
         self._lock = threading.Lock()
+        self._last_state_sample = None
 
     def stop(self):
         self.base.stop(255)
@@ -134,11 +135,20 @@ class RobotController:
     def state(self):
         status = self.localizer.status()
         x, y, theta = status["pose"]
+        now = time.perf_counter()
+        vx = vy = omega = 0.0
+        if self._last_state_sample is not None:
+            last_t, last_x, last_y, last_theta = self._last_state_sample
+            dt = now - last_t
+            if dt > 1e-4:
+                vx, vy = (x - last_x) / dt, (y - last_y) / dt
+                omega = math.degrees(_wrap_rad(theta - last_theta) / dt)
+        self._last_state_sample = (now, x, y, theta)
         with self._lock:
             mode, target, target_theta = self.mode, self.target, self.target_theta
         return {
             "robot": {"x": x, "y": y, "theta": math.degrees(theta),
-                      "vx": 0.0, "vy": 0.0, "omega": 0.0},
+                      "vx": vx, "vy": vy, "omega": omega},
             "opponent": {"valid": False},
             "motion": {"mode": mode,
                        "target_x": target[0] if target else None,
@@ -209,7 +219,7 @@ def main():
         )
 
         def on_report(report):
-            ekf_ms = report.timings_ms.get("correct", 0.0)
+            ekf_ms = report.timings_ms.get("ekf_total", report.timings_ms.get("correct", 0.0))
             print(
                 f"Tour {report.rev_number:5d} | {_format_poles(report)} | "
                 f"calcul {report.proc_ms:5.1f} ms | EKF {ekf_ms:5.1f} ms",
