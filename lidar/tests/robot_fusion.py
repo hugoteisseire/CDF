@@ -73,6 +73,7 @@ class RobotController:
         }
         self.motion_status = "idle"
         self.motion_error = None
+        self._opponent = {"valid": False}
 
     def stop(self):
         self.base.stop(255)
@@ -169,7 +170,7 @@ class RobotController:
                     self.motion_error = None
 
     def update_fusion_report(self, report):
-        """Conserve les diagnostics du dernier tour lidar pour les deux interfaces."""
+        """Conserve les diagnostics lidar et la détection de la balise adverse."""
         matches = []
         for match in report.result.matches:
             matches.append({
@@ -180,7 +181,22 @@ class RobotController:
             })
         status = self.localizer.status()
         sx, sy, st = status["std"]
+        opponent = find_opponent_cluster(
+            report.clusters, report.pose, report.result.matches,
+            self.localizer.ekf.p.pole_radius_mm,
+            self.localizer.ekf.p.lidar_offset_mm,
+            self.localizer.ekf.p.lidar_zero_deg,
+        )
+        opponent_state = {"valid": False}
+        if opponent is not None:
+            (op_x, op_y), op_cluster = opponent
+            opponent_state = {
+                "valid": True, "x": op_x, "y": op_y,
+                "width_mm": op_cluster.width_mm,
+                "n_points": op_cluster.n_points,
+            }
         with self._lock:
+            self._opponent = opponent_state
             self._last_fusion = {
                 "ready": status["ready"], "reliable": status["reliable"],
                 "lost": status["lost"], "std_x": sx, "std_y": sy,
@@ -212,7 +228,7 @@ class RobotController:
         return {
             "robot": {"x": x, "y": y, "theta": math.degrees(theta),
                       "vx": vx, "vy": vy, "omega": omega},
-            "opponent": {"valid": False},
+            "opponent": dict(self._opponent),
             "motion": {"mode": mode, "status": self.motion_status,
                        "error": self.motion_error,
                        "target_x": target[0] if target else None,
@@ -221,6 +237,46 @@ class RobotController:
                        "moving": mode != "idle"},
             "fusion": dict(self._last_fusion),
         }
+
+
+OPPONENT_BEACON_DIAMETER_MM = 100.0
+OPPONENT_BEACON_WIDTH_MIN_MM = 0.0
+OPPONENT_BEACON_WIDTH_MAX_MM = 250.0
+OPPONENT_BEACON_MIN_POINTS = 2
+
+
+def find_opponent_cluster(clusters, pose, matched_poles, pole_radius_mm=50.0,
+                          lidar_offset_mm=(0.0, 0.0), lidar_zero_deg=0.0):
+    """Retourne la position terrain et le cluster de la balise adverse, ou None."""
+    x, y, theta = pose
+    ox, oy = lidar_offset_mm
+    lidar_x = x + ox * math.cos(theta) - oy * math.sin(theta)
+    lidar_y = y + ox * math.sin(theta) + oy * math.cos(theta)
+    matched_ids = {id(match.cluster) for match in matched_poles if match.cluster is not None}
+    candidates = []
+
+    for cluster in clusters:
+        if id(cluster) in matched_ids:
+            continue
+        width = float(cluster.width_mm)
+        if not (OPPONENT_BEACON_WIDTH_MIN_MM <= width <= OPPONENT_BEACON_WIDTH_MAX_MM):
+            continue
+        if cluster.n_points < OPPONENT_BEACON_MIN_POINTS:
+            continue
+
+        angle = theta + math.radians(lidar_zero_deg - cluster.angle_deg)
+        center_dist = cluster.dist_mm + OPPONENT_BEACON_DIAMETER_MM / 2.0
+        position = (
+            lidar_x + center_dist * math.cos(angle),
+            lidar_y + center_dist * math.sin(angle),
+        )
+        score = (abs(width - OPPONENT_BEACON_DIAMETER_MM), -cluster.n_points)
+        candidates.append((score, position, cluster))
+
+    if not candidates:
+        return None
+    _, position, cluster = min(candidates, key=lambda item: item[0])
+    return position, cluster
 
 
 def _format_poles(report):
