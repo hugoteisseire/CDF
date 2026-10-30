@@ -187,11 +187,11 @@ class RobotController:
             self.localizer.ekf.p.lidar_offset_mm,
             self.localizer.ekf.p.lidar_zero_deg,
         )
-        opponent_state = {"valid": False}
+        opponent_state = {"valid": False, "in_zone": True}
         if opponent is not None:
             (op_x, op_y), op_cluster = opponent
             opponent_state = {
-                "valid": True, "x": op_x, "y": op_y,
+                "valid": True, "in_zone": False, "x": op_x, "y": op_y,
                 "width_mm": op_cluster.width_mm,
                 "n_points": op_cluster.n_points,
             }
@@ -239,6 +239,7 @@ class RobotController:
         }
 
 
+OPPONENT_IGNORE_ZONE = (0.0, 500.0, 800.0, 1500.0)  # xmin, xmax, ymin, ymax (mm)
 OPPONENT_BEACON_DIAMETER_MM = 100.0
 OPPONENT_BEACON_WIDTH_MIN_MM = 0.0
 OPPONENT_BEACON_WIDTH_MAX_MM = 250.0
