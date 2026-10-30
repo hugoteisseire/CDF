@@ -96,7 +96,7 @@ class RobotController:
                 self._velocity = (cmd["vx"], cmd["vy"], cmd["omega"], cmd["frame"])
         elif kind == "cmd.goto":
             self.stop()
-            x, y, theta, _ = self.localizer.status()["pose"] + (None,)
+            x, y, theta = self.localizer.status()["pose"]
             dx, dy = cmd["x"] - x, cmd["y"] - y
             distance = math.hypot(dx, dy)
             dtheta = 0.0 if cmd.get("theta") is None else _wrap_rad(math.radians(cmd["theta"]) - theta)
@@ -186,6 +186,9 @@ def main():
     stop_event = threading.Event()
     try:
         bus, notifier, group, base = build_base(args.odometry_hz)
+        # L'odométrie conserve le cap absolu initial : les déplacements globaux
+        # de HolonomicBase sont ainsi exprimés dans le repère terrain.
+        base.reset_pose(0.0, 0.0, math.radians(args.theta0_deg))
         base.start()
         time.sleep(0.3)
 
