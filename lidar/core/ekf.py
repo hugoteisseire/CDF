@@ -291,7 +291,10 @@ class PoseEKF:
             return False, mahal
 
         # Gain différent pour chaque instant : K_i = Cov(x_i, x_ref) H' S^-1.
-        gains = cross_ref @ H.T @ S_inv             # (N, 3, 2)
+        # Factoriser le calcul du gain : le terme commun H' S^-1 est calculé une seule fois.
+        # (N, 3, 3) @ (3, 2) -> (N, 3, 2).
+        gain_factor = H.T @ S_inv
+        gains = cross_ref @ gain_factor
         dx_now = gains[-1] @ innovation
         correction_pos_mm = math.hypot(float(dx_now[0]), float(dx_now[1]))
         correction_theta_deg = abs(math.degrees(float(dx_now[2])))
@@ -303,11 +306,19 @@ class PoseEKF:
         dx_history = gains @ innovation
         self._hx = [x + dx for x, dx in zip(self._hx, dx_history)]
 
-        # Mise à jour conditionnelle complète, vectorisée : P_ij+ = P_ij - K_i H Cov(x_ref, x_j).
-        # Le tenseur contient toutes les covariances croisées; la symétrisation limite les erreurs d'arrondi.
-        kh = gains @ H
-        cov_ref_j = cross_ref.transpose(0, 2, 1)
-        self._hC -= np.einsum("iab,jbc->ijac", kh, cov_ref_j, optimize=True)
+        # Mise à jour conditionnelle complète : P_ij+ = P_ij - K_i H Cov(x_ref, x_j).
+        # On forme d'abord H Cov(x_ref, x_j), puis on utilise la multiplication matricielle
+        # broadcastée. Cela évite l'étape intermédiaire kh = K_i H et laisse NumPy/BLAS
+        # optimiser les petits produits matriciels par lots.
+        cov_ref_j = cross_ref.transpose(0, 2, 1)       # (N, 3, 3)
+        h_cov_ref_j = H @ cov_ref_j                    # (N, 2, 3)
+        covariance_delta = np.matmul(
+            gains[:, None, :, :],                      # (N, 1, 3, 2)
+            h_cov_ref_j[None, :, :, :],                # (1, N, 2, 3)
+        )                                               # (N, N, 3, 3)
+        self._hC -= covariance_delta
+        # La symétrie bloc-transposée est théoriquement exacte ; on la rétablit pour
+        # limiter les asymétries dues aux arrondis numériques.
         self._hC = 0.5 * (self._hC + self._hC.transpose(1, 0, 3, 2))
         self._hP = [self._hC[i, i].copy() for i in range(n)]
 
