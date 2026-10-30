@@ -324,7 +324,9 @@ def main():
         base.start()
         time.sleep(0.3)
 
-        acq = LidarProcess(args.port, min_raw_points=args.min_points, cpu=args.lidar_cpu)
+        # La fusion privilégie la fraîcheur : à 10 Hz, 2 tours limitent l'attente à ~200 ms.
+        # En cas de surcharge, LidarProcess élimine déjà le plus ancien tour.
+        acq = LidarProcess(args.port, min_raw_points=args.min_points, queue_size=2, cpu=args.lidar_cpu)
         acq.start()
 
         ekf_params = EkfParams(
