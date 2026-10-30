@@ -370,6 +370,8 @@ class Localizer:
 
     def _process_one(self, rev):
         p = self.ekf.p
+        # Délai entre la fin de l'acquisition du tour et le début de son traitement.
+        queue_wait_ms = max(0.0, (time.time_ns() - rev.t_end_ns) / 1e6)
         t0 = time.perf_counter()
         capped = cap_points(rev.points, self._cp)
         t1 = time.perf_counter()
@@ -454,6 +456,9 @@ class Localizer:
             lost = self.lost
             e2e_avg_5s_ms = self._e2e_avg_5s_ms
             self.revs_processed += 1
+        # Inclut toutes les prédictions odométriques effectuées depuis le rapport précédent,
+        # y compris celles déclenchées pendant le traitement de ce tour.
+        ekf_predict_ms = self._ekf_predict_ms
         report = Report(
             rev.number, t_ref, len(rev.points), len(capped), len(clusters), res, pose, std,
             (t5 - t0) * 1e3, clusters=clusters,
@@ -468,7 +473,7 @@ class Localizer:
             timings_ms={"cap_points": (t1 - t0) * 1e3, "filter_points_in_field": (t_geom - t1) * 1e3,
                         "find_clusters": (t2 - t_geom) * 1e3, "associate_poles": (t3 - t2) * 1e3,
                         "correct": (t4 - t3) * 1e3,
-                        "ekf_total": self._ekf_predict_ms + (t4 - t3) * 1e3,
+                        "ekf_total": ekf_predict_ms + (t4 - t3) * 1e3,
                         "relocalize": (t5 - t4) * 1e3,
                         "total": (t5 - t0) * 1e3},
         )
