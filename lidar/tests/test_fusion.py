@@ -222,6 +222,7 @@ def points_angle_dist(pts):
     return ang[ok], dist[ok]
 
 
+OPPONENT_IGNORE_ZONE = (0.0, 500.0, 800.0, 1500.0)  # xmin, xmax, ymin, ymax (mm)
 OPPONENT_BEACON_DIAMETER_MM = 100.0
 OPPONENT_BEACON_WIDTH_MIN_MM = 0.0
 OPPONENT_BEACON_WIDTH_MAX_MM = 250.0
@@ -391,6 +392,17 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
             line((225, 229, 234), (xmin, gy), (xmax, gy), 1)
             gy += 500
 
+        # Zone attribuée à l'adversaire lorsqu'aucune balise n'est détectée.
+        zone_xmin, zone_xmax, zone_ymin, zone_ymax = OPPONENT_IGNORE_ZONE
+        zone_top_left = xy((zone_xmin, zone_ymax))
+        zone_bottom_right = xy((zone_xmax, zone_ymin))
+        zone_rect = pygame.Rect(zone_top_left[0], zone_top_left[1],
+                                zone_bottom_right[0] - zone_top_left[0],
+                                zone_bottom_right[1] - zone_top_left[1])
+        pygame.draw.rect(screen, (245, 190, 55), zone_rect, 2)
+        screen.blit(small.render("Zone adverse (si balise non détectée)", True, (155, 105, 15)),
+                    (zone_rect.x + 4, zone_rect.y + 4))
+
         # Poteaux théoriques fixes du modèle.
         # Zone d'exclusion toujours visible.
         
@@ -478,6 +490,12 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
                          f"| largeur {opponent_cluster.width_mm:.0f} mm")
                 screen.blit(small.render(label, True, opponent_color),
                             (opponent_screen[0] + 10, opponent_screen[1] + 8))
+            else:
+                zone_center = ((zone_xmin + zone_xmax) / 2.0, (zone_ymin + zone_ymax) / 2.0)
+                zone_screen = xy(zone_center)
+                screen.blit(small.render("Adversaire considéré dans sa zone (balise non détectée)",
+                                         True, (155, 105, 15)),
+                            (zone_screen[0] + 8, zone_screen[1]))
 
             # Légende et état d'association.
             legend = [((35, 105, 210), "Poteau théorique"), ((120, 125, 135), "Axe attendu / recherche"),
