@@ -150,6 +150,8 @@ class Localizer:
         self._on_pose = on_pose
         self.odo_clock = ClockAligner("odometrie", unit="s")
         self._last_odo_t = None
+        self._last_odo_epoch_s = None
+        self._last_odo_read_epoch_s = None
         self._ekf_predict_ms = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -269,9 +271,13 @@ class Localizer:
         if t is None or t == self._last_odo_t:
             return
         self._last_odo_t = t
+        # Conserver l'instant source converti et l'heure de lecture pour diagnostiquer
+        # un éventuel retard de la boucle d'odométrie ou un décalage d'horloge.
         # t est l'instant de lecture des moteurs (horloge de l'odométrie) ; on le ramène à l'heure système
         # pour qu'il soit comparable aux horodatages du lidar.
         ts = self.odo_clock.epoch_s(t)
+        self._last_odo_epoch_s = ts
+        self._last_odo_read_epoch_s = time.time()
         with self._lock:
             if not self.ekf.ready:
                 # Le filtre démarre au premier échantillon d'odométrie, à la pose donnée par l'utilisateur
@@ -364,9 +370,23 @@ class Localizer:
                 self._pending_rev = rev
                 delta_ms = (rev_latest_measure_s - history_end) * 1000.0
                 self._timestamp_waits += 1
+                # Comparer les quatre repères temporels sur la même horloge epoch.
+                # Cela permet de distinguer une odométrie ancienne d'un décalage
+                # entre horodatages lidar et EKF.
+                now_epoch_s = time.time()
+                odo_age_ms = ((now_epoch_s - self._last_odo_epoch_s) * 1000.0
+                              if self._last_odo_epoch_s is not None else float("nan"))
+                history_age_ms = ((now_epoch_s - history_end) * 1000.0
+                                  if history_end is not None else float("nan"))
+                lidar_age_ms = (now_epoch_s - rev_end_s) * 1000.0
+                odo_read_age_ms = ((now_epoch_s - self._last_odo_read_epoch_s) * 1000.0
+                                   if self._last_odo_read_epoch_s is not None else float("nan"))
                 self._timestamp_diag(
                     f"MESURE TROP RÉCENTE : tour {rev.number}, EKF en retard de {delta_ms:.1f} ms "
-                    f"(tolérance {tol_s * 1000:.0f} ms), attente de l'odométrie"
+                    f"(tolérance {tol_s * 1000:.0f} ms), attente de l'odométrie | "
+                    f"âge odo={odo_age_ms:.1f} ms (lecture il y a {odo_read_age_ms:.1f} ms) "
+                    f"EKF={history_age_ms:.1f} ms lidar={lidar_age_ms:.1f} ms "
+                    f"odo_hz={self._odo_hz:.1f}"
                 )
                 return
 
