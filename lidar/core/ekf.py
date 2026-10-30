@@ -13,6 +13,7 @@ Ce module fournit aussi, pour l'étape 3 (association) et l'étape 4 (correction
 """
 import bisect
 import math
+import time
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
@@ -95,6 +96,36 @@ class PoseEKF:
         self._ht, self._hx, self._hP = [], [], []  # historique : instants, poses, covariances
         # _hC[i][j] = Cov(x_i, x_j), indispensable pour traiter une mesure retardée.
         self._hC = np.empty((0, 0, 3, 3), dtype=float)
+        self.profile = self._new_profile()
+
+    @staticmethod
+    def _new_profile():
+        return {name: {"count": 0, "total_s": 0.0, "max_s": 0.0}
+                for name in ("predict", "record", "correct")}
+
+    def profile_snapshot(self):
+        """Statistiques cumulées de coût interne, destinées au diagnostic."""
+        out = {}
+        for name, values in self.profile.items():
+            count = values["count"]
+            out[name] = {
+                "count": count,
+                "mean_ms": values["total_s"] / count * 1000.0 if count else 0.0,
+                "max_ms": values["max_s"] * 1000.0,
+            }
+        out["history_len"] = len(self._ht)
+        out["history_covariance_bytes"] = int(self._hC.nbytes)
+        return out
+
+    def reset_profile(self):
+        """Remet à zéro les compteurs sans toucher à l'état du filtre."""
+        self.profile = self._new_profile()
+
+    def _profile_add(self, name, elapsed_s):
+        stat = self.profile[name]
+        stat["count"] += 1
+        stat["total_s"] += elapsed_s
+        stat["max_s"] = max(stat["max_s"], elapsed_s)
 
     # ------------------------------------------------------------------ étape 1 : état
     def reset(self, x_mm, y_mm, theta_rad, t_s, pos_std_mm=None, theta_std_rad=None):
@@ -138,6 +169,7 @@ class PoseEKF:
         self.predict(c * dx + s * dy, -s * dx + c * dy, dth, t_s)   # repère odométrie -> repère robot
 
     def predict(self, dxl_mm, dyl_mm, dth_rad, t_s):
+        _profile_t0 = time.perf_counter()
         """Applique un déplacement exprimé dans le repère ROBOT : il est converti dans le repère
         terrain avec le cap courant (c'est ce qui rend le filtre « étendu »), et l'incertitude grandit."""
         th = self.x[2]
@@ -161,9 +193,11 @@ class PoseEKF:
         Q = G @ np.diag([var_t, var_t, var_r]) @ G.T
         self.P = F @ self.P @ F.T + Q
         self._record(t_s, transition_F=F)
+        self._profile_add('predict', time.perf_counter() - _profile_t0)
 
     # ------------------------------------------------------------------ historique
     def _record(self, t_s, transition_F=None):
+        _profile_t0 = time.perf_counter()
         """Enregistre un état et propage les covariances croisées de l'historique.
 
         transition_F est la jacobienne de la transition depuis le dernier état enregistré.
@@ -172,6 +206,7 @@ class PoseEKF:
         if self._ht and t_s <= self._ht[-1]:       # même instant : remplace la dernière entrée
             self._hx[-1], self._hP[-1] = self.x.copy(), self.P.copy()
             self._hC[-1, -1] = self.P.copy()
+            self._profile_add('record', time.perf_counter() - _profile_t0)
             return
         if not self._ht:
             self._hC = self.P.reshape((1, 1, 3, 3)).copy()
@@ -193,6 +228,7 @@ class PoseEKF:
         if k > 0:
             del self._ht[:k], self._hx[:k], self._hP[:k]
             self._hC = self._hC[k:, k:].copy()
+        self._profile_add('record', time.perf_counter() - _profile_t0)
 
     def state_at(self, t_s) -> Optional[StateAt]:
         """Pose et incertitude à l'instant t_s (interpolées). Hors historique : on prend l'entrée la
@@ -244,6 +280,16 @@ class PoseEKF:
 
     def correct_pole(self, pole_index: int, measured_dist_mm: float, measured_angle_deg: float,
                      gate_chi2: float = 9.21, t_s: Optional[float] = None):
+        """Mesure le coût total d'une correction, y compris les refus précoces."""
+        started = time.perf_counter()
+        try:
+            return self._correct_pole_impl(pole_index, measured_dist_mm, measured_angle_deg,
+                                           gate_chi2=gate_chi2, t_s=t_s)
+        finally:
+            self._profile_add('correct', time.perf_counter() - started)
+
+    def _correct_pole_impl(self, pole_index: int, measured_dist_mm: float, measured_angle_deg: float,
+                           gate_chi2: float = 9.21, t_s: Optional[float] = None):
         """Corrige une mesure de poteau, y compris lorsqu'elle est retardée.
 
         Les covariances croisées de l'historique donnent Cov(x_i, x_mesure) : la correction
