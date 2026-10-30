@@ -146,6 +146,7 @@ class Localizer:
         self._on_pose = on_pose
         self.odo_clock = ClockAligner("odometrie", unit="s")
         self._last_odo_t = None
+        self._ekf_predict_ms = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -263,7 +264,9 @@ class Localizer:
                 # Le filtre démarre au premier échantillon d'odométrie, à la pose donnée par l'utilisateur
                 # (repère terrain). Ensuite il n'utilise plus que les déplacements de l'odométrie.
                 self.ekf.reset(*self._init_pose, ts)
+            _ekf_t0 = time.perf_counter()
             self.ekf.predict_odometry(x, y, th, ts)
+            self._ekf_predict_ms += (time.perf_counter() - _ekf_t0) * 1000.0
             pose = self.ekf.pose
         self._tick_odo_rate()
 
@@ -453,9 +456,12 @@ class Localizer:
             odo_hz=self._odo_hz,
             timings_ms={"cap_points": (t1 - t0) * 1e3, "filter_points_in_field": (t_geom - t1) * 1e3,
                         "find_clusters": (t2 - t_geom) * 1e3, "associate_poles": (t3 - t2) * 1e3,
-                        "correct": (t4 - t3) * 1e3, "relocalize": (t5 - t4) * 1e3,
+                        "correct": (t4 - t3) * 1e3,
+                        "ekf_total": self._ekf_predict_ms + (t4 - t3) * 1e3,
+                        "relocalize": (t5 - t4) * 1e3,
                         "total": (t5 - t0) * 1e3},
         )
+        self._ekf_predict_ms = 0.0
         self._write_log(report)
         if self._on_report is not None:
             self._on_report(report)
