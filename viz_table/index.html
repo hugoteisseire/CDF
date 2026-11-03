@@ -127,7 +127,8 @@ function setLayer(name, data) {
   const isNew = !layers[name];
   layers[name] = { data, t: performance.now() };
   if (isNew) renderLayers();
-  if (name === "robot") onRobot(data);\n  if (name === "opponent") renderRobotInfo();
+  if (name === "robot") onRobot(data);
+  if (name === "opponent") renderRobotInfo();
 }
 function sendCmd(cmd, args = {}) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", cmd, args }));
@@ -286,7 +287,7 @@ function drawOpponent(l) {
   if (age > 0.5) label(`vu il y a ${age.toFixed(1)} s`, d.x + 30, d.y + 30, "#a02828");
 }
 function drawRobot(d) {
-  if (typeof d.x !== "number") return;
+  if (!Number.isFinite(d.x) || !Number.isFinite(d.y)) return;
   const r = d.r || 150, a = ((d.theta || 0) * Math.PI) / 180;
   ctx.lineWidth = 2; ctx.strokeStyle = "#1f6feb99";
   ctx.beginPath();
@@ -300,13 +301,23 @@ function drawRobot(d) {
   }
   ctx.stroke();
   if (d.target) {
-    const [x, y] = d.target; ctx.strokeStyle = "#1a7f37"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(sx(x) - 8, sy(y) - 8); ctx.lineTo(sx(x) + 8, sy(y) + 8);
-    ctx.moveTo(sx(x) + 8, sy(y) - 8); ctx.lineTo(sx(x) - 8, sy(y) + 8); ctx.stroke();
+    const x = Array.isArray(d.target) ? d.target[0] : d.target.x;
+    const y = Array.isArray(d.target) ? d.target[1] : d.target.y;
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      ctx.strokeStyle = "#1a7f37"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(sx(x) - 8, sy(y) - 8); ctx.lineTo(sx(x) + 8, sy(y) + 8);
+      ctx.moveTo(sx(x) + 8, sy(y) - 8); ctx.lineTo(sx(x) - 8, sy(y) + 8); ctx.stroke();
+    }
   }
   circle(d.x, d.y, r, ROBOT_FILL, ROBOT_STROKE);
-  ctx.beginPath(); ctx.moveTo(sx(d.x), sy(d.y));
-  ctx.lineTo(sx(d.x + Math.cos(a) * r), sy(d.y + Math.sin(a) * r)); ctx.lineWidth = 3; ctx.strokeStyle = "#0b3d91"; ctx.stroke();
+  const cx = sx(d.x), cy = sy(d.y);
+  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = ROBOT_STROKE; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - 10, cy); ctx.lineTo(cx + 10, cy);
+  ctx.moveTo(cx, cy - 10); ctx.lineTo(cx, cy + 10); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy);
+  ctx.lineTo(sx(d.x + Math.cos(a) * r), sy(d.y + Math.sin(a) * r));
+  ctx.lineWidth = 3; ctx.strokeStyle = "#0b3d91"; ctx.stroke();
 }
 function draw() {
   const cw = cv.width / dpr, ch = cv.height / dpr;
@@ -330,7 +341,7 @@ function draw() {
   }
   if (layers.opponent && !hidden.has("opponent")) drawOpponent(layers.opponent);
   if (layers.robot && !hidden.has("robot")) drawRobot(layers.robot.data);
-  if (pointer) {\n    ctx.save(); ctx.strokeStyle = mode === "none" ? "#20252b" : "#e63946";\n    ctx.lineWidth = 2; ctx.beginPath();\n    ctx.moveTo(pointer.px - 12, pointer.py); ctx.lineTo(pointer.px + 12, pointer.py);\n    ctx.moveTo(pointer.px, pointer.py - 12); ctx.lineTo(pointer.px, pointer.py + 12);\n    ctx.arc(pointer.px, pointer.py, 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();\n  }\n  if (down && cur) {   // aperçu pendant un glisser
+  if (pointer) {\n    ctx.save(); ctx.strokeStyle = mode === "none" ? "#20252b" : "#e63946";\n    ctx.lineWidth = 2; ctx.beginPath();\n    ctx.moveTo(pointer.px - 12, pointer.py); ctx.lineTo(pointer.px + 12, pointer.py);\n    ctx.moveTo(pointer.px, pointer.py - 12); ctx.lineTo(pointer.px, pointer.py + 12);\n    ctx.arc(pointer.px, pointer.py, 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();\n  }\n  if (pointer) {\n    ctx.save(); ctx.strokeStyle = mode === "none" ? "#20252b" : "#e63946";\n    ctx.lineWidth = 2; ctx.beginPath();\n    ctx.moveTo(pointer.px - 12, pointer.py); ctx.lineTo(pointer.px + 12, pointer.py);\n    ctx.moveTo(pointer.px, pointer.py - 12); ctx.lineTo(pointer.px, pointer.py + 12);\n    ctx.arc(pointer.px, pointer.py, 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();\n  }\n  if (down && cur) {   // aperçu pendant un glisser
     ctx.setLineDash([5, 4]); ctx.lineWidth = 2; ctx.strokeStyle = "#444";
     const far = Math.hypot(cur.px - down.px, cur.py - down.py) > 15;
     if (mode === "set_robot_pose") { ctx.beginPath(); ctx.moveTo(down.px, down.py); ctx.lineTo(cur.px, cur.py); ctx.stroke(); }
