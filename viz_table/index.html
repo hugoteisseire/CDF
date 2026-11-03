@@ -127,8 +127,7 @@ function setLayer(name, data) {
   const isNew = !layers[name];
   layers[name] = { data, t: performance.now() };
   if (isNew) renderLayers();
-  if (name === "robot") onRobot(data);
-  if (name === "opponent") renderRobotInfo();
+  if (name === "robot") onRobot(data);\n  if (name === "opponent") renderRobotInfo();
 }
 function sendCmd(cmd, args = {}) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", cmd, args }));
@@ -137,7 +136,7 @@ function sendCmd(cmd, args = {}) {
 
 // ---------- panneau latéral ----------
 function onRobot(d) {
-  if (typeof d.x !== "number" || typeof d.y !== "number") return;
+  if (!Number.isFinite(d.x) || !Number.isFinite(d.y)) return;
   const last = trail[trail.length - 1];
   if (!last || Math.hypot(last[0] - d.x, last[1] - d.y) > 5) {
     trail.push([d.x, d.y]);
@@ -148,7 +147,7 @@ function onRobot(d) {
 function renderRobotInfo() {
   const robot = layers.robot && layers.robot.data;
   const opponent = layers.opponent && layers.opponent.data;
-  const f = (v, n = 0) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(n) : "-");
+  const f = (v, n = 0) => Number.isFinite(v) ? v.toFixed(n) : "-";
   const robotText = robot && Number.isFinite(robot.x) && Number.isFinite(robot.y)
     ? `Robot  x ${f(robot.x)} mm   y ${f(robot.y)} mm\n       θ ${f(robot.theta, 1)}°\n       v ${f(robot.v, 2)} m/s   ω ${f(robot.omega, 1)} °/s`
     : "Robot  pas de données";
@@ -157,3 +156,252 @@ function renderRobotInfo() {
     : "Adverse pas de données";
   $("robotinfo").textContent = robotText + "\n" + opponentText;
 }
+function renderClients() {
+  $("clients").innerHTML = clients.length ? "" : "aucun programme connecté";
+  for (const c of clients) {
+    const color = !c.connected ? "#f85149" : c.age < 2 ? "#3fb950" : "#d29922";
+    const txt = !c.connected ? "déconnecté" : c.age < 2 ? "actif" : `silencieux depuis ${c.age.toFixed(0)} s`;
+    const div = document.createElement("div");
+    div.innerHTML = `<span class="dot" style="background:${color}"></span>${c.name} · ${txt}`;
+    $("clients").appendChild(div);
+  }
+}
+function renderLayers() {
+  const box = $("layers"); box.innerHTML = "";
+  for (const name of Object.keys(layers).sort()) {
+    const l = document.createElement("label");
+    const c = document.createElement("input");
+    c.type = "checkbox"; c.checked = !hidden.has(name);
+    c.onchange = () => { c.checked ? hidden.delete(name) : hidden.add(name); };
+    l.append(c, " " + name); box.appendChild(l);
+  }
+  if (!Object.keys(layers).length) box.textContent = "aucune couche reçue";
+}
+function toast(text) {
+  const t = $("toast"); t.textContent = text; t.style.display = "block";
+  clearTimeout(toast.h); toast.h = setTimeout(() => (t.style.display = "none"), 3000);
+}
+function buildControls() {
+  for (const b of BUTTONS) {
+    const el = document.createElement("button");
+    el.textContent = b.label; if (b.cls) el.className = b.cls;
+    el.onclick = () => sendCmd(b.cmd, b.args || {});
+    $("buttons").appendChild(el);
+  }
+  const sel = document.createElement("select");
+  sel.innerHTML = `<option value="">Choisir la stratégie…</option>` +
+    STRATEGIES.map(s => `<option>${s}</option>`).join("");
+  sel.onchange = () => { if (sel.value) sendCmd("set_strategy", { name: sel.value }); };
+  $("buttons").appendChild(sel);
+  for (const [id, label] of MODES) {
+    const l = document.createElement("label");
+    const r = document.createElement("input");
+    r.type = "radio"; r.name = "mode"; r.checked = id === mode;
+    r.onchange = () => { mode = id; cv.style.cursor = id === "none" ? "default" : "crosshair"; };
+    l.append(r, " " + label); $("modes").appendChild(l);
+  }
+  $("flip").onchange = e => (flip = e.target.checked);
+  $("grid").onchange = e => (showGrid = e.target.checked);
+  $("clrtrail").onclick = () => (trail = []);
+}
+
+// ---------- dessin ----------
+function resize() {
+  const r = cv.getBoundingClientRect(); dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+}
+function circle(x, y, r, fill, stroke, dash) {
+  ctx.beginPath(); ctx.arc(sx(x), sy(y), Math.max(r * G.s, 1), 0, 7);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.setLineDash(dash || []); ctx.strokeStyle = stroke; ctx.stroke(); ctx.setLineDash([]); }
+}
+function label(text, x, y, color, size = 12) {
+  ctx.fillStyle = color || "#333"; ctx.font = `${size}px system-ui`; ctx.fillText(text, sx(x), sy(y));
+}
+function drawGrid() {
+  ctx.lineWidth = 1; ctx.font = "10px system-ui"; ctx.fillStyle = "#777";
+  for (let x = 0; x <= W; x += 100) {
+    ctx.strokeStyle = x % 500 ? "#0000000d" : "#00000030";
+    ctx.beginPath(); ctx.moveTo(sx(x), sy(0)); ctx.lineTo(sx(x), sy(H)); ctx.stroke();
+    if (x % 500 === 0) ctx.fillText(x, sx(x) + 2, sy(0) + 12);
+  }
+  for (let y = 0; y <= H; y += 100) {
+    ctx.strokeStyle = y % 500 ? "#0000000d" : "#00000030";
+    ctx.beginPath(); ctx.moveTo(sx(0), sy(y)); ctx.lineTo(sx(W), sy(y)); ctx.stroke();
+    if (y % 500 === 0 && y > 0) ctx.fillText(y, (flip ? sx(W) : sx(0)) + 3, sy(y) - 2);
+  }
+}
+function drawShapes(list) {   // couche libre : {"shapes": [{type: circle|rect|line|polyline|text, ...}]}
+  for (const o of list) {
+    ctx.lineWidth = o.width || 1.5; ctx.strokeStyle = o.color || "#555"; ctx.fillStyle = o.fill || "transparent";
+    if (o.type === "circle") circle(o.x, o.y, o.r, o.fill, o.color || "#555");
+    else if (o.type === "rect") {
+      const x0 = Math.min(sx(o.x), sx(o.x + o.w)), y0 = sy(o.y + o.h);
+      ctx.fillRect(x0, y0, o.w * G.s, o.h * G.s); ctx.strokeRect(x0, y0, o.w * G.s, o.h * G.s);
+    } else if (o.type === "line") {
+      ctx.beginPath(); ctx.moveTo(sx(o.x1), sy(o.y1)); ctx.lineTo(sx(o.x2), sy(o.y2)); ctx.stroke();
+    } else if (o.type === "polyline" && o.points && o.points.length) {
+      ctx.beginPath(); o.points.forEach(([x, y], i) => (i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)))); ctx.stroke();
+    } else if (o.type === "text") label(o.text, o.x, o.y, o.color, o.size);
+  }
+}
+// rectangle orienté d'un élément : 4 coins en mm (grand côté l le long de l'axe local x)
+function dims(o) {   // w perpendiculaire à theta, l le long de theta ; valeur -1 : élément de 110 x 100
+  return { w: o.w || ELEM_W, l: o.l || (o.value === -1 ? ELEM_L_M1 : ELEM_L) };
+}
+function corners(o) {
+  const { w, l } = dims(o), a = ((o.theta || 0) * Math.PI) / 180;
+  const c = Math.cos(a), sn = Math.sin(a);
+  return [[-l / 2, -w / 2], [l / 2, -w / 2], [l / 2, w / 2], [-l / 2, w / 2]]
+    .map(([u, v]) => [o.x + u * c - v * sn, o.y + u * sn + v * c]);
+}
+function tracePoly(pts) {
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => (i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y))));
+  ctx.closePath();
+}
+function drawItems(items) {   // éléments de jeu : [{id, x, y, theta, value, w?, l?, color?}]
+  for (const o of items) {
+    tracePoly(corners(o));
+    ctx.fillStyle = o.color || "#d4a017"; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "#4a3a00"; ctx.stroke();
+    // trait vers l'extrémité du grand côté, côté theta (part à 35 % pour laisser la place à la valeur)
+    const a = ((o.theta || 0) * Math.PI) / 180, h = dims(o).l / 2;
+    ctx.beginPath();
+    ctx.moveTo(sx(o.x + Math.cos(a) * h * 0.35), sy(o.y + Math.sin(a) * h * 0.35));
+    ctx.lineTo(sx(o.x + Math.cos(a) * h), sy(o.y + Math.sin(a) * h)); ctx.stroke();
+    ctx.fillStyle = "#4a3a00"; ctx.textAlign = "center";
+    if (o.value !== undefined && o.value !== null) {   // la valeur (0 à 3) au centre
+      ctx.font = "bold 15px system-ui"; ctx.fillText(o.value, sx(o.x), sy(o.y) + 5);
+    }
+    if (o.id) { ctx.font = "9px system-ui"; ctx.fillText(o.id, sx(o.x), sy(o.y) - 10); }
+    ctx.textAlign = "start";
+  }
+}
+function drawOpponent(l) {
+  const d = l.data, age = (performance.now() - l.t) / 1000, old = age > 2;
+  ctx.lineWidth = 2;
+  circle(d.x, d.y, d.rmax || 200, old ? "rgba(220,60,60,.06)" : "rgba(220,60,60,.18)", "#dc3c3c", old ? [6, 4] : null);
+  circle(d.x, d.y, 25, "#dc3c3c");
+  if (age > 0.5) label(`vu il y a ${age.toFixed(1)} s`, d.x + 30, d.y + 30, "#a02828");
+}
+function drawRobot(d) {
+  if (typeof d.x !== "number") return;
+  const r = d.r || 150, a = ((d.theta || 0) * Math.PI) / 180;
+  ctx.lineWidth = 2; ctx.strokeStyle = "#1f6feb99";
+  ctx.beginPath();
+  let trailStarted = false;
+  for (const p of trail) {
+    const x = Array.isArray(p) ? p[0] : p && p.x;
+    const y = Array.isArray(p) ? p[1] : p && p.y;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (trailStarted) ctx.lineTo(sx(x), sy(y));
+    else { ctx.moveTo(sx(x), sy(y)); trailStarted = true; }
+  }
+  ctx.stroke();
+  if (d.target) {
+    const [x, y] = d.target; ctx.strokeStyle = "#1a7f37"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sx(x) - 8, sy(y) - 8); ctx.lineTo(sx(x) + 8, sy(y) + 8);
+    ctx.moveTo(sx(x) + 8, sy(y) - 8); ctx.lineTo(sx(x) - 8, sy(y) + 8); ctx.stroke();
+  }
+  circle(d.x, d.y, r, ROBOT_FILL, ROBOT_STROKE);
+  ctx.beginPath(); ctx.moveTo(sx(d.x), sy(d.y));
+  ctx.lineTo(sx(d.x + Math.cos(a) * r), sy(d.y + Math.sin(a) * r)); ctx.lineWidth = 3; ctx.strokeStyle = "#0b3d91"; ctx.stroke();
+}
+function draw() {
+  const cw = cv.width / dpr, ch = cv.height / dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, cw, ch);
+  const s = Math.min(cw / (W + 2 * M), ch / (H + 2 * M));
+  G = { s, ox: (cw - W * s) / 2, oy: (ch + H * s) / 2 };
+  if (BG.complete && BG.naturalWidth) {   // image de fond (retournée si l'affichage est inversé)
+    ctx.save();
+    if (flip) { ctx.translate(G.ox + W * s, 0); ctx.scale(-1, 1); ctx.drawImage(BG, 0, G.oy - H * s, W * s, H * s); }
+    else ctx.drawImage(BG, G.ox, G.oy - H * s, W * s, H * s);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = "#f1ede2"; ctx.fillRect(G.ox, G.oy - H * s, W * s, H * s);
+  }
+  if (showGrid) drawGrid();
+  ctx.lineWidth = 2; ctx.strokeStyle = "#222"; ctx.strokeRect(G.ox, G.oy - H * s, W * s, H * s);
+  for (const [n, l] of Object.entries(layers)) {
+    if (hidden.has(n) || n === "robot" || n === "opponent" || !l.data) continue;
+    if (l.data.shapes) drawShapes(l.data.shapes);
+    if (l.data.items) drawItems(l.data.items);
+  }
+  if (layers.opponent && !hidden.has("opponent")) drawOpponent(layers.opponent);
+  if (layers.robot && !hidden.has("robot")) drawRobot(layers.robot.data);
+  if (pointer) {\n    ctx.save(); ctx.strokeStyle = mode === "none" ? "#20252b" : "#e63946";\n    ctx.lineWidth = 2; ctx.beginPath();\n    ctx.moveTo(pointer.px - 12, pointer.py); ctx.lineTo(pointer.px + 12, pointer.py);\n    ctx.moveTo(pointer.px, pointer.py - 12); ctx.lineTo(pointer.px, pointer.py + 12);\n    ctx.arc(pointer.px, pointer.py, 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();\n  }\n  if (down && cur) {   // aperçu pendant un glisser
+    ctx.setLineDash([5, 4]); ctx.lineWidth = 2; ctx.strokeStyle = "#444";
+    const far = Math.hypot(cur.px - down.px, cur.py - down.py) > 15;
+    if (mode === "set_robot_pose") { ctx.beginPath(); ctx.moveTo(down.px, down.py); ctx.lineTo(cur.px, cur.py); ctx.stroke(); }
+    let pv = null;
+    if (mode === "add_element") pv = { x: down.x, y: down.y, theta: far ? angleDeg(down.x, down.y, cur.x, cur.y) : 0 };
+    else if (mode === "move_element" && dragEl) pv = { ...dragEl, x: cur.x, y: cur.y };
+    else if (mode === "rotate_element" && dragEl) pv = { ...dragEl, theta: far ? angleDeg(dragEl.x, dragEl.y, cur.x, cur.y) : dragEl.theta };
+    if (pv) { tracePoly(corners(pv)); ctx.stroke(); }
+    ctx.setLineDash([]);
+  }
+  requestAnimationFrame(draw);
+}
+
+// ---------- souris / tactile ----------
+function point(e) {
+  const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  return { px, py, x: tx(px), y: ty(py) };
+}
+function nearestElement(x, y) {   // élément sous le point (rectangle orienté, +20 mm de tolérance)
+  let best = null, bd = Infinity;
+  for (const [n, l] of Object.entries(layers)) {
+    if (hidden.has(n) || !l.data || !l.data.items) continue;
+    for (const o of l.data.items) {
+      const a = ((o.theta || 0) * Math.PI) / 180, dx = x - o.x, dy = y - o.y;
+      const u = dx * Math.cos(a) + dy * Math.sin(a), v = -dx * Math.sin(a) + dy * Math.cos(a);
+      const d = Math.hypot(dx, dy);
+      const dm = dims(o);
+      if (o.id && Math.abs(u) <= dm.l / 2 + 20 && Math.abs(v) <= dm.w / 2 + 20 && d < bd) { best = o; bd = d; }
+    }
+  }
+  return best;
+}
+cv.addEventListener("pointerdown", e => {
+  cv.setPointerCapture(e.pointerId);
+  down = cur = point(e); dragEl = null;
+  if (mode === "move_element" || mode === "rotate_element") {
+    const o = nearestElement(down.x, down.y);
+    if (o) dragEl = { ...o }; else down = null;
+  }
+});
+cv.addEventListener("pointermove", e => {
+  const p = point(e); pointer = { px: e.offsetX * dpr, py: e.offsetY * dpr }; if (down) cur = p;
+  $("coords").textContent = `x ${Math.round(p.x)} mm   y ${Math.round(p.y)} mm`;
+});
+cv.addEventListener("pointerup", e => {
+  if (!down) return;
+  const p = point(e), moved = Math.hypot(p.px - down.px, p.py - down.py) > 15;
+  const x = Math.round(down.x), y = Math.round(down.y);
+  if (mode === "goto") sendCmd("goto", { x, y });
+  else if (mode === "set_opponent") sendCmd("set_opponent", { x, y });
+  else if (mode === "add_element") {
+    const args = { x, y };
+    if (moved) args.theta = angleDeg(down.x, down.y, p.x, p.y);
+    sendCmd("add_element", args);
+  } else if (mode === "set_robot_pose") {
+    const args = { x, y };
+    if (moved) args.theta = angleDeg(down.x, down.y, p.x, p.y);
+    sendCmd("set_robot_pose", args);
+  } else if (mode === "remove_element") {
+    const o = nearestElement(down.x, down.y);
+    if (o) sendCmd("remove_element", { id: o.id });
+  } else if (mode === "move_element" && dragEl) {
+    sendCmd("move_element", { id: dragEl.id, x: Math.round(p.x), y: Math.round(p.y) });
+  } else if (mode === "rotate_element" && dragEl && moved) {
+    sendCmd("rotate_element", { id: dragEl.id, theta: angleDeg(dragEl.x, dragEl.y, p.x, p.y) });
+  }
+  down = cur = null; dragEl = null;
+});
+
+window.addEventListener("resize", resize);
+buildControls(); resize(); connect(); renderClients(); renderLayers(); draw();
+</script>
+</body>
+</html>
