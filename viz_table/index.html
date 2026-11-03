@@ -127,7 +127,8 @@ function setLayer(name, data) {
   const isNew = !layers[name];
   layers[name] = { data, t: performance.now() };
   if (isNew) renderLayers();
-  if (name === "robot") onRobot(data);\n  if (name === "opponent") renderRobotInfo();
+  if (name === "robot") onRobot(data);
+  if (name === "opponent") renderRobotInfo();
 }
 function sendCmd(cmd, args = {}) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", cmd, args }));
@@ -149,10 +150,10 @@ function renderRobotInfo() {
   const opponent = layers.opponent && layers.opponent.data;
   const f = (v, n = 0) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(n) : "-");
   const robotText = robot && Number.isFinite(robot.x) && Number.isFinite(robot.y)
-    ? `Robot  x ${f(robot.x)} mm   y ${f(robot.y)} mm\\n       θ ${f(robot.theta, 1)}°\\n       v ${f(robot.v, 2)} m/s   ω ${f(robot.omega, 1)} °/s`
+    ? `Robot  x ${f(robot.x)} mm   y ${f(robot.y)} mm\n       θ ${f(robot.theta, 1)}°\n       v ${f(robot.v, 2)} m/s   ω ${f(robot.omega, 1)} °/s`
     : "Robot  pas de données";
   const opponentText = opponent && Number.isFinite(opponent.x) && Number.isFinite(opponent.y)
     ? `Adverse x ${f(opponent.x)} mm   y ${f(opponent.y)} mm`
     : "Adverse pas de données";
-  $("robotinfo").textContent = robotText + "\\n" + opponentText;
+  $("robotinfo").textContent = robotText + "\n" + opponentText;
 }
