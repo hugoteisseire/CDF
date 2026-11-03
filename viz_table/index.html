@@ -93,7 +93,7 @@ let clients = [], trail = [];
 let mode = "none", flip = false, showGrid = true;
 let ws = null, dpr = 1, G = { s: 1, ox: 0, oy: 0 };
 const BG = new Image(); if (TABLE_IMAGE) BG.src = TABLE_IMAGE;
-let down = null, cur = null, dragEl = null, pointer = null;
+let down = null, cur = null, dragEl = null;
 const angleDeg = (x1, y1, x2, y2) => Math.round((Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI);
 
 // ---------- repère : table (mm, origine en bas à gauche) <-> écran (px) ----------
@@ -128,7 +128,6 @@ function setLayer(name, data) {
   layers[name] = { data, t: performance.now() };
   if (isNew) renderLayers();
   if (name === "robot") onRobot(data);
-  if (name === "opponent") renderRobotInfo();
 }
 function sendCmd(cmd, args = {}) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", cmd, args }));
@@ -137,25 +136,15 @@ function sendCmd(cmd, args = {}) {
 
 // ---------- panneau latéral ----------
 function onRobot(d) {
-  if (!Number.isFinite(d.x) || !Number.isFinite(d.y)) return;
+  if (typeof d.x !== "number") return;
   const last = trail[trail.length - 1];
   if (!last || Math.hypot(last[0] - d.x, last[1] - d.y) > 5) {
     trail.push([d.x, d.y]);
     if (trail.length > 600) trail.shift();
   }
-  renderRobotInfo();
-}
-function renderRobotInfo() {
-  const robot = layers.robot && layers.robot.data;
-  const opponent = layers.opponent && layers.opponent.data;
-  const f = (v, n = 0) => Number.isFinite(v) ? v.toFixed(n) : "-";
-  const robotText = robot && Number.isFinite(robot.x) && Number.isFinite(robot.y)
-    ? `Robot  x ${f(robot.x)} mm   y ${f(robot.y)} mm\n       θ ${f(robot.theta, 1)}°\n       v ${f(robot.v, 2)} m/s   ω ${f(robot.omega, 1)} °/s`
-    : "Robot  pas de données";
-  const opponentText = opponent && Number.isFinite(opponent.x) && Number.isFinite(opponent.y)
-    ? `Adverse x ${f(opponent.x)} mm   y ${f(opponent.y)} mm`
-    : "Adverse pas de données";
-  $("robotinfo").textContent = robotText + "\n" + opponentText;
+  const f = (v, n = 0) => (typeof v === "number" ? v.toFixed(n) : "-");
+  $("robotinfo").textContent =
+    `x ${f(d.x)} mm   y ${f(d.y)} mm\nθ ${f(d.theta, 1)}°\nv ${f(d.v, 2)} m/s   ω ${f(d.omega, 1)} °/s`;
 }
 function renderClients() {
   $("clients").innerHTML = clients.length ? "" : "aucun programme connecté";
@@ -287,37 +276,18 @@ function drawOpponent(l) {
   if (age > 0.5) label(`vu il y a ${age.toFixed(1)} s`, d.x + 30, d.y + 30, "#a02828");
 }
 function drawRobot(d) {
-  if (!Number.isFinite(d.x) || !Number.isFinite(d.y)) return;
+  if (typeof d.x !== "number") return;
   const r = d.r || 150, a = ((d.theta || 0) * Math.PI) / 180;
   ctx.lineWidth = 2; ctx.strokeStyle = "#1f6feb99";
-  ctx.beginPath();
-  let trailStarted = false;
-  for (const p of trail) {
-    const x = Array.isArray(p) ? p[0] : p && p.x;
-    const y = Array.isArray(p) ? p[1] : p && p.y;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (trailStarted) ctx.lineTo(sx(x), sy(y));
-    else { ctx.moveTo(sx(x), sy(y)); trailStarted = true; }
-  }
-  ctx.stroke();
+  ctx.beginPath(); trail.forEach(([x, y], i) => (i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)))); ctx.stroke();
   if (d.target) {
-    const x = Array.isArray(d.target) ? d.target[0] : d.target.x;
-    const y = Array.isArray(d.target) ? d.target[1] : d.target.y;
-    if (Number.isFinite(x) && Number.isFinite(y)) {
-      ctx.strokeStyle = "#1a7f37"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(sx(x) - 8, sy(y) - 8); ctx.lineTo(sx(x) + 8, sy(y) + 8);
-      ctx.moveTo(sx(x) + 8, sy(y) - 8); ctx.lineTo(sx(x) - 8, sy(y) + 8); ctx.stroke();
-    }
+    const [x, y] = d.target; ctx.strokeStyle = "#1a7f37"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sx(x) - 8, sy(y) - 8); ctx.lineTo(sx(x) + 8, sy(y) + 8);
+    ctx.moveTo(sx(x) + 8, sy(y) - 8); ctx.lineTo(sx(x) - 8, sy(y) + 8); ctx.stroke();
   }
   circle(d.x, d.y, r, ROBOT_FILL, ROBOT_STROKE);
-  const cx = sx(d.x), cy = sy(d.y);
-  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-  ctx.fillStyle = "#fff"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = ROBOT_STROKE; ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx - 10, cy); ctx.lineTo(cx + 10, cy);
-  ctx.moveTo(cx, cy - 10); ctx.lineTo(cx, cy + 10); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx, cy);
-  ctx.lineTo(sx(d.x + Math.cos(a) * r), sy(d.y + Math.sin(a) * r));
-  ctx.lineWidth = 3; ctx.strokeStyle = "#0b3d91"; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(sx(d.x), sy(d.y));
+  ctx.lineTo(sx(d.x + Math.cos(a) * r), sy(d.y + Math.sin(a) * r)); ctx.lineWidth = 3; ctx.strokeStyle = "#0b3d91"; ctx.stroke();
 }
 function draw() {
   const cw = cv.width / dpr, ch = cv.height / dpr;
@@ -341,7 +311,7 @@ function draw() {
   }
   if (layers.opponent && !hidden.has("opponent")) drawOpponent(layers.opponent);
   if (layers.robot && !hidden.has("robot")) drawRobot(layers.robot.data);
-  if (pointer) {\n    ctx.save(); ctx.strokeStyle = mode === "none" ? "#20252b" : "#e63946";\n    ctx.lineWidth = 2; ctx.beginPath();\n    ctx.moveTo(pointer.px - 12, pointer.py); ctx.lineTo(pointer.px + 12, pointer.py);\n    ctx.moveTo(pointer.px, pointer.py - 12); ctx.lineTo(pointer.px, pointer.py + 12);\n    ctx.arc(pointer.px, pointer.py, 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();\n  }\n  if (pointer) {\n    ctx.save(); ctx.strokeStyle = mode === "none" ? "#20252b" : "#e63946";\n    ctx.lineWidth = 2; ctx.beginPath();\n    ctx.moveTo(pointer.px - 12, pointer.py); ctx.lineTo(pointer.px + 12, pointer.py);\n    ctx.moveTo(pointer.px, pointer.py - 12); ctx.lineTo(pointer.px, pointer.py + 12);\n    ctx.arc(pointer.px, pointer.py, 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();\n  }\n  if (down && cur) {   // aperçu pendant un glisser
+  if (down && cur) {   // aperçu pendant un glisser
     ctx.setLineDash([5, 4]); ctx.lineWidth = 2; ctx.strokeStyle = "#444";
     const far = Math.hypot(cur.px - down.px, cur.py - down.py) > 15;
     if (mode === "set_robot_pose") { ctx.beginPath(); ctx.moveTo(down.px, down.py); ctx.lineTo(cur.px, cur.py); ctx.stroke(); }
@@ -383,7 +353,7 @@ cv.addEventListener("pointerdown", e => {
   }
 });
 cv.addEventListener("pointermove", e => {
-  const p = point(e); pointer = { px: e.offsetX * dpr, py: e.offsetY * dpr }; if (down) cur = p;
+  const p = point(e); if (down) cur = p;
   $("coords").textContent = `x ${Math.round(p.x)} mm   y ${Math.round(p.y)} mm`;
 });
 cv.addEventListener("pointerup", e => {
