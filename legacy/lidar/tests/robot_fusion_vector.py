@@ -28,6 +28,7 @@ from base_holo.core.motor_controller import Motor, MotorGroup
 from lidar.core.ekf import EkfParams
 from lidar.core.lidar_process import LidarProcess
 from lidar.core.localizer import Localizer
+from lidar.core.thread_monitor import ThreadCpuMonitor
 from lidar.core.pole_association import AssocParams
 from viz_table.robot_protocol import RobotProtocolServer
 from viz_table.viz_client import Viz
@@ -964,6 +965,8 @@ def main():
             params=ekf_params, assoc=assoc, on_report=on_report,
         )
         loc.start()
+        # Diagnostic : %CPU de chaque thread toutes les 2 s (qui prend la main au localizer ?)
+        ThreadCpuMonitor(period_s=2.0, extra_pids={"lidar(fils)": acq.pid}).start()
         controller = RobotController(base, loc)
         viz = Viz("robot")
         viz.on("goto", lambda args: controller.goto(
