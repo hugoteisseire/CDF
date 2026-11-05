@@ -335,7 +335,10 @@ class Response:
                 - distance: The distance of the scan point in millimeters
         """
         quality = (response[0] >> 2) & 0b111111
-        angle = ((response[1] & 0b01111111) | (response[2] << 7)) / 64
+        # Protocole RPLIDAR, mode SCAN (0x20) : octets 1-2 = u16 little endian
+        # « check_bit:1 ; angle_q6:15 ». Le bit 0 de l'octet 1 est le bit C (toujours 1),
+        # il faut donc décaler de 1 (SL_LIDAR_RESP_MEASUREMENT_ANGLE_SHIFT du SDK Slamtec).
+        angle = ((response[1] >> 1) | (response[2] << 7)) / 64
         angle = round(
             (round(angle * 3) / 3), 2
         )  # round to closest 0.33 which is precision of rplidarc1
