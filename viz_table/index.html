@@ -18,6 +18,8 @@
        margin: 16px 0 6px; }
   h2:first-child { margin-top: 0; }
   label { display: block; margin: 3px 0; cursor: pointer; }
+  input[type=number] { width: 80px; background: #3a414b; color: inherit; border: 0; padding: 4px 6px;
+                       border-radius: 6px; font: inherit; float: right; }
   button, select { background: #3a414b; color: inherit; border: 0; padding: 8px 10px;
                    border-radius: 6px; cursor: pointer; margin: 0 4px 6px 0; font: inherit; }
   button:hover { background: #4a525e; }
@@ -47,6 +49,19 @@
     <label><input type="checkbox" id="grid" checked> Grille</label>
     <button id="clrtrail">Effacer la traînée</button>
     <h2>Action au clic sur la table</h2><div id="modes"></div>
+    <h2>Chase the Mouse</h2>
+    <label>Gain (1/s) <input type="number" id="cgain" min="0.1" step="0.1" value="1.5"></label>
+    <label>Vitesse max (mm/s) <input type="number" id="cvmax" min="10" step="50" value="400"></label>
+    <label>Zone morte (mm) <input type="number" id="cdead" min="0" step="10" value="30"></label>
+    <label><input type="checkbox" id="cturn"> Tourner vers la souris</label>
+    <label><input type="checkbox" id="crobotframe"> Consigne en repère robot</label>
+    <div id="chaseinfo" style="font:12px ui-monospace,monospace;white-space:pre;color:#c9d1d9">inactif</div>
+    <div style="font-size:11px;color:#6b7686">v = gain × (distance − zone morte), plafonnée ; envoi 20 Hz ; le robot s'arrête seul après 0,5 s sans consigne</div>
+    <h2>Goto</h2>
+    <label>Vitesse (mm/s) <input type="number" id="gspeed" min="1" step="50" value="300"></label>
+    <label>Accélération (mm/s²) <input type="number" id="gacc" min="1" step="50" placeholder="défaut robot"></label>
+    <label>Boost roue rapide <input type="number" id="gboost" min="-255" max="255" step="1" value="-2"></label>
+    <div style="font-size:11px;color:#6b7686">champ vide = valeur par défaut du robot (300 mm/s ; 800 ou 500 mm/s²)</div>
     <h2>Commandes</h2><div id="buttons"></div>
   </aside>
 </div>
@@ -81,10 +96,13 @@ const DEFAULTS = {
     ["move_element", "Déplacer un élément (glisser)"],
     ["rotate_element", "Orienter un élément (glisser)"],
     ["remove_element", "Retirer un élément"],
+    ["chase", "Chase the Mouse (le robot suit le pointeur, move velocity)"],
   ],
 };
 const { W, H, M, ELEM_W, ELEM_L, ELEM_L_M1, TABLE_IMAGE, ROBOT_FILL, ROBOT_STROKE, BUTTONS, STRATEGIES, MODES } =
   Object.assign({}, DEFAULTS, window.CONFIG || {});
+if (!MODES.some(m => m[0] === "chase"))   // config.js peut redéfinir MODES sans ce mode
+  MODES.push(["chase", "Chase the Mouse (le robot suit le pointeur, move velocity)"]);
 // =================================================================
 
 const $ = id => document.getElementById(id);
@@ -108,7 +126,7 @@ const ty = py => (G.oy - py) / G.s;
 function connect() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/view");
   ws.onopen = () => setStatus(true);
-  ws.onclose = () => { setStatus(false); setTimeout(connect, 1000); };
+  ws.onclose = () => { diagNote("connexion WebSocket fermée"); setStatus(false); setTimeout(connect, 1000); };
   ws.onmessage = e => handle(JSON.parse(e.data));
 }
 function setStatus(ok) {
@@ -125,11 +143,50 @@ function handle(m) {
   else if (m.type === "clients") { clients = m.clients; renderClients(); }
   else if (m.type === "nodest") toast(`Aucun programme n'écoute la commande « ${m.cmd} »`);
 }
+// ---------- diagnostic : trous de réception, retard relatif, affichage figé ----------
+const DIAG = { lastRx: null, lastSeq: null, minLat: Infinity, lastFrame: performance.now(),
+               n: 0, gapMax: 0, latMax: 0, log: [] };
+const diagBox = document.createElement("div");
+diagBox.style.cssText = "position:fixed;left:6px;bottom:6px;z-index:99;max-width:60vw;padding:4px 6px;" +
+  "font:11px monospace;white-space:pre;background:rgba(0,0,0,.65);color:#fff;border-radius:4px;pointer-events:none";
+document.body.appendChild(diagBox);
+function diagStamp() {
+  const t = new Date();
+  return t.toTimeString().slice(0, 8) + "." + String(t.getMilliseconds()).padStart(3, "0");
+}
+function diagNote(text) {
+  const line = diagStamp() + " " + text;
+  console.warn("[DIAG]", line);
+  DIAG.log.unshift(line); DIAG.log.length = Math.min(DIAG.log.length, 6);
+}
+function diagRobot(d) {
+  const now = performance.now();
+  if (DIAG.lastRx !== null) {
+    const gap = now - DIAG.lastRx;
+    DIAG.gapMax = Math.max(DIAG.gapMax, gap);
+    if (gap > 300) diagNote(`trou réception robot ${gap.toFixed(0)} ms (seq ${DIAG.lastSeq} -> ${d.seq})`);
+  }
+  if (typeof d.seq === "number" && typeof DIAG.lastSeq === "number" && d.seq !== DIAG.lastSeq + 1)
+    diagNote(`seq sautés : ${DIAG.lastSeq} -> ${d.seq}`);
+  if (typeof d.t_robot_ms === "number") {   // horloges différentes : on suit le retard RELATIF au minimum vu
+    const lat = Date.now() - d.t_robot_ms;
+    DIAG.minLat = Math.min(DIAG.minLat, lat);
+    DIAG.latMax = Math.max(DIAG.latMax, lat - DIAG.minLat);
+    if (lat - DIAG.minLat > 500) diagNote(`message robot en retard de ${(lat - DIAG.minLat).toFixed(0)} ms`);
+  }
+  DIAG.lastRx = now; DIAG.lastSeq = d.seq; DIAG.n++;
+}
+setInterval(() => {
+  diagBox.textContent = `diag : robot ${DIAG.n} msg/s | trou max ${DIAG.gapMax.toFixed(0)} ms | ` +
+    `retard max ${DIAG.latMax.toFixed(0)} ms | seq ${DIAG.lastSeq}` + (DIAG.log.length ? "\n" + DIAG.log.join("\n") : "");
+  DIAG.n = 0; DIAG.gapMax = 0; DIAG.latMax = 0;
+}, 1000);
+
 function setLayer(name, data) {
   const isNew = !layers[name];
   layers[name] = { data, t: performance.now() };
   if (isNew) renderLayers();
-  if (name === "robot") onRobot(data);
+  if (name === "robot") { diagRobot(data); onRobot(data); }
   if (name === "opponent") onOpponent(data);
 }
 // Dernière position adverse réellement détectée (le robot envoie aussi des trames "valid: false")
@@ -355,7 +412,10 @@ function drawFrame() {
   }
 }
 function draw() {   // une erreur de dessin ne doit jamais arrêter la boucle d'affichage
-  try { drawFrame(); } catch (e) { console.error("draw:", e); }
+  const tf = performance.now();
+  if (tf - DIAG.lastFrame > 300) diagNote(`affichage figé ${(tf - DIAG.lastFrame).toFixed(0)} ms (onglet en arrière-plan ?)`);
+  DIAG.lastFrame = tf;
+  try { drawFrame(); drawChase(); } catch (e) { console.error("draw:", e); }
   requestAnimationFrame(draw);
 }
 
@@ -389,7 +449,9 @@ cv.addEventListener("pointerdown", e => {
 cv.addEventListener("pointermove", e => {
   const p = point(e); if (down) cur = p;
   $("coords").textContent = `x ${Math.round(p.x)} mm   y ${Math.round(p.y)} mm`;
+  chase.mouse = p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H ? { x: p.x, y: p.y } : null;
 });
+cv.addEventListener("pointerleave", () => { chase.mouse = null; chaseTick(); });
 cv.addEventListener("pointerup", e => {
   if (!down) return;
   const p = point(e), moved = Math.hypot(p.px - down.px, p.py - down.py) > 15;
@@ -397,6 +459,11 @@ cv.addEventListener("pointerup", e => {
   if (mode === "goto") {
     const args = { x, y };
     if (moved) args.theta = angleDeg(down.x, down.y, p.x, p.y);   // glisser = angle d'arrivée
+    const speed = parseFloat($("gspeed").value), acc = parseFloat($("gacc").value);
+    if (speed > 0) args.speed = speed;   // vide/invalide = défaut du robot
+    if (acc > 0) args.acc = acc;
+    const boost = parseInt($("gboost").value, 10);
+    if (Number.isFinite(boost)) args.fastest_boost = boost;   // fastest_boost de move_direction
     sendCmd("goto", args);
   } else if (mode === "rotate") {
     if (moved) sendCmd("rotate", { theta: angleDeg(down.x, down.y, p.x, p.y) });   // angle cible
@@ -420,6 +487,66 @@ cv.addEventListener("pointerup", e => {
   }
   down = cur = null; dragEl = null;
 });
+
+// ---------- Chase the Mouse : consigne "velocity" continue vers le pointeur ----------
+// Banc d'essai de move velocity (pas un mode de match). Vitesse = gain × (distance − zone morte),
+// plafonnée ; direction = robot -> souris. Arrêt sûr : vitesse nulle dès que le mode est quitté,
+// que la souris sort de la table, que la pose robot est périmée ou que l'onglet est masqué ;
+// si la page ne peut plus envoyer, le robot s'arrête seul (timeout CHASE_TIMEOUT_S).
+const CHASE_PERIOD_MS = 50, CHASE_TIMEOUT_S = 0.5, CHASE_ROBOT_MAX_AGE_MS = 500;
+const CHASE_TURN_KP = 3, CHASE_TURN_MAX = 120;   // (°/s) par degré d'erreur de cap, plafond en °/s
+const chase = { mouse: null, active: false };
+function chaseNum(id, def) { const v = parseFloat($(id).value); return Number.isFinite(v) && v >= 0 ? v : def; }
+function chaseSend(args) { ws.send(JSON.stringify({ type: "cmd", cmd: "velocity", args })); }
+function chaseStop(reason) {
+  if (chase.active && ws && ws.readyState === 1)
+    chaseSend({ vx: 0, vy: 0, omega: 0, frame: "field", timeout: CHASE_TIMEOUT_S });
+  chase.active = false;
+  $("chaseinfo").textContent = mode === "chase" ? `arrêt : ${reason}` : "inactif";
+}
+function chaseTick() {
+  if (mode !== "chase") { if (chase.active) chaseStop("mode désactivé"); return; }
+  if (!ws || ws.readyState !== 1) { chase.active = false; $("chaseinfo").textContent = "arrêt : pas de connexion"; return; }
+  const m = chase.mouse, rl = layers.robot, r = rl && rl.data;
+  if (document.hidden) return chaseStop("onglet masqué");
+  if (!m) return chaseStop("souris hors de la table");
+  if (!r || typeof r.x !== "number" || performance.now() - rl.t > CHASE_ROBOT_MAX_AGE_MS)
+    return chaseStop("pose robot absente ou périmée");
+  const dx = m.x - r.x, dy = m.y - r.y, d = Math.hypot(dx, dy);
+  const gain = chaseNum("cgain", 1.5), vmax = chaseNum("cvmax", 400), dead = chaseNum("cdead", 30);
+  const v = d <= dead ? 0 : Math.min(vmax, gain * (d - dead));
+  let vx = d > 0 ? (v * dx) / d : 0, vy = d > 0 ? (v * dy) / d : 0, omega = 0;
+  const th = ((r.theta || 0) * Math.PI) / 180;
+  if ($("cturn").checked && d > dead) {
+    const a = Math.atan2(dy, dx) - th, err = Math.atan2(Math.sin(a), Math.cos(a));
+    omega = Math.max(-CHASE_TURN_MAX, Math.min(CHASE_TURN_MAX, (CHASE_TURN_KP * err * 180) / Math.PI));
+  }
+  let frame = "field";
+  if ($("crobotframe").checked) {   // projection avec le cap AFFICHÉ (en retard) : révèle l'erreur de repère
+    const c = Math.cos(th), s = Math.sin(th);
+    [vx, vy] = [c * vx + s * vy, -s * vx + c * vy]; frame = "robot";
+  }
+  chaseSend({ vx: Math.round(vx), vy: Math.round(vy), omega: Math.round(omega * 10) / 10,
+              frame, timeout: CHASE_TIMEOUT_S });
+  chase.active = true;
+  const meas = typeof r.v === "number" ? r.v * 1000 : Math.hypot(r.vx || 0, r.vy || 0);
+  $("chaseinfo").textContent = `distance ${d.toFixed(0)} mm\nconsigne ${v.toFixed(0)} mm/s   ω ${omega.toFixed(0)} °/s\n` +
+    `mesuré   ${meas.toFixed(0)} mm/s   (pose vue il y a ${(performance.now() - rl.t).toFixed(0)} ms)`;
+}
+function drawChase() {
+  if (mode !== "chase" || !chase.mouse) return;
+  const m = chase.mouse, r = layers.robot && layers.robot.data;
+  ctx.lineWidth = 2;
+  circle(m.x, m.y, Math.max(chaseNum("cdead", 30), 5), null, "#ff8c00", [4, 4]);
+  if (r && typeof r.x === "number") {
+    ctx.strokeStyle = chase.active ? "#ff8c00" : "#888"; ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(sx(r.x), sy(r.y)); ctx.lineTo(sx(m.x), sy(m.y)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+setInterval(chaseTick, CHASE_PERIOD_MS);
+document.addEventListener("visibilitychange", chaseTick);
+window.addEventListener("blur", () => { chase.mouse = null; chaseTick(); });
 
 window.addEventListener("resize", resize);
 buildControls(); resize(); connect(); renderClients(); renderLayers(); draw();

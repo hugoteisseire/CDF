@@ -22,6 +22,38 @@ PORT = 8000
 layers = {}     # nom de couche -> dernières données reçues (pas d'historique)
 programs = {}   # nom de programme -> {"ws", "subscribe", "last_seen", "connected"}
 viewers = set()  # navigateurs connectés
+chasing = set()  # navigateurs dont la dernière consigne "velocity" n'est pas nulle (Chase the Mouse)
+
+# Diagnostic : trous dans la couche "robot", envois lents vers un navigateur, boucle bloquée.
+DIAG = {"rx": 0, "gap_max": 0.0, "bcast_max": 0.0, "slow": 0, "last_t": None, "last_seq": None,
+        "t0": time.monotonic()}
+
+
+def _stamp():
+    t = time.time()
+    return time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t * 1000) % 1000:03d}"
+
+
+def _peer(ws):
+    c = getattr(ws, "client", None)
+    return f"{c.host}:{c.port}" if c else "?"
+
+
+async def diag_loop():
+    """Mesure le retard de la boucle asyncio et affiche un bilan toutes les 2 s."""
+    while True:
+        t0 = time.perf_counter()
+        await asyncio.sleep(0.05)
+        lag = (time.perf_counter() - t0) * 1000 - 50
+        if lag > 100:
+            print(f"[SERVEUR] {_stamp()} boucle asyncio bloquée {lag:.0f} ms", flush=True)
+        now = time.monotonic()
+        if now - DIAG["t0"] >= 2.0:
+            print(f"[SERVEUR] {_stamp()} robot reçu {DIAG['rx'] / (now - DIAG['t0']):4.1f}/s | "
+                  f"trou max {DIAG['gap_max']:5.0f} ms | diffusion max {DIAG['bcast_max']:5.1f} ms | "
+                  f"envois lents {DIAG['slow']} | navigateurs {len(viewers)} "
+                  f"({', '.join(_peer(v) for v in viewers)})", flush=True)
+            DIAG.update(rx=0, gap_max=0.0, bcast_max=0.0, slow=0, t0=now)
 
 
 def clients_status():
@@ -35,11 +67,19 @@ def clients_status():
 async def broadcast(msg):
     """Envoie un message à tous les navigateurs."""
     text = json.dumps(msg)
+    t_all = time.perf_counter()
     for ws in list(viewers):
+        t0 = time.perf_counter()
         try:
             await ws.send_text(text)
         except Exception:
             viewers.discard(ws)
+        dt = (time.perf_counter() - t0) * 1000
+        if dt > 50:
+            DIAG["slow"] += 1
+            print(f"[SERVEUR] {_stamp()} envoi lent vers le navigateur {_peer(ws)} : {dt:.0f} ms "
+                  f"(message {msg.get('layer', msg.get('type'))})", flush=True)
+    DIAG["bcast_max"] = max(DIAG["bcast_max"], (time.perf_counter() - t_all) * 1000)
 
 
 async def clients_loop():
@@ -53,8 +93,10 @@ async def clients_loop():
 @asynccontextmanager
 async def lifespan(app):
     task = asyncio.create_task(clients_loop())
+    diag_task = asyncio.create_task(diag_loop())
     yield
     task.cancel()
+    diag_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -109,6 +151,17 @@ async def ws_prog(ws: WebSocket, name: str = "anonyme"):
             if kind == "hello":
                 info["subscribe"] = set(msg.get("subscribe", []))
             elif kind == "layer" and "layer" in msg:
+                if msg["layer"] == "robot":
+                    now = time.perf_counter()
+                    seq = (msg.get("data") or {}).get("seq")
+                    if DIAG["last_t"] is not None:
+                        gap = (now - DIAG["last_t"]) * 1000
+                        DIAG["gap_max"] = max(DIAG["gap_max"], gap)
+                        if gap > 300:
+                            print(f"[SERVEUR] {_stamp()} trou de {gap:.0f} ms dans la couche robot "
+                                  f"reçue de {name} (seq {DIAG['last_seq']} -> {seq})", flush=True)
+                    DIAG["last_t"], DIAG["last_seq"] = now, seq
+                    DIAG["rx"] += 1
                 layers[msg["layer"]] = msg.get("data")
                 await broadcast({"type": "layer", "layer": msg["layer"],
                                  "data": msg.get("data"), "from": name})
@@ -126,6 +179,12 @@ async def ws_prog(ws: WebSocket, name: str = "anonyme"):
 async def route_command(msg, viewer):
     """Relaie une commande du navigateur aux programmes qui l'ont demandée."""
     cmd = msg.get("cmd")
+    if cmd == "velocity" and viewer is not None:
+        a = msg.get("args") or {}
+        if any(a.get(k) for k in ("vx", "vy", "omega")):
+            chasing.add(viewer)
+        else:
+            chasing.discard(viewer)
     out = json.dumps({"type": "cmd", "cmd": cmd, "args": msg.get("args", {})})
     sent = 0
     for p in programs.values():
@@ -135,7 +194,7 @@ async def route_command(msg, viewer):
                 sent += 1
             except Exception:
                 p["connected"] = False
-    if sent == 0:
+    if sent == 0 and viewer is not None:
         await viewer.send_text(json.dumps({"type": "nodest", "cmd": cmd}))
 
 
@@ -157,6 +216,10 @@ async def ws_view(ws: WebSocket):
         pass
     finally:
         viewers.discard(ws)
+        if ws in chasing:   # le navigateur qui pilotait en vitesse est parti : arrêt immédiat
+            chasing.discard(ws)
+            await route_command({"cmd": "velocity",
+                                 "args": {"vx": 0, "vy": 0, "omega": 0, "timeout": 0.2}}, None)
 
 
 if __name__ == "__main__":

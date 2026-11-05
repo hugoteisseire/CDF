@@ -32,6 +32,7 @@ from .lidar_clusters import Cluster
 
 @dataclass
 class RelocParams:
+    enabled: bool = True                # False : le filtre perdu n'essaie plus de se relocaliser
     width_min_mm: float = 15.0          # taille d'un cluster compatible avec un poteau de 100 mm
     width_max_mm: float = 150.0
     min_points: int = 2

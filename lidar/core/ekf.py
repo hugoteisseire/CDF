@@ -50,8 +50,8 @@ class EkfParams:
     # Modèle "marche aléatoire" calé sur le plan : "2 % -> 1 m parcouru ajoute ~20 mm d'incertitude".
     # Variance ajoutée à chaque pas = err² x distance du pas x distance de référence, donc après
     # 1 m (= la référence) l'écart-type vaut err x 1 m = 20 mm.
-    odo_trans_err: float = 0.01           # 6 % de la distance : incertitude odométrique multipliée par 3
-    odo_rot_err: float = 0.02            # 3 % de l'angle : incertitude odométrique multipliée par 3
+    odo_trans_err: float = 0.03           # 6 % de la distance : incertitude odométrique multipliée par 3
+    odo_rot_err: float = 0.03            # 3 % de l'angle : incertitude odométrique multipliée par 3
     odo_ref_dist_mm: float = 1000.0
     odo_ref_angle_rad: float = 1.0
 
@@ -83,6 +83,14 @@ class EkfParams:
     field_mm: tuple = (0.0, 0.0, 3000.0, 2000.0)   # (xmin, ymin, xmax, ymax) : une pose hors du terrain est refusée
     field_margin_mm: float = 300.0
     field_filter_margin_mm: float = 200.0  # marge autour du terrain pour filtrer les impacts lidar
+    # Les poteaux sont déjà ~100 mm hors du terrain : si la pose a dérivé (poteaux perdus), leurs impacts
+    # projetés sortent de la marge normale, le filtre les efface et ils ne peuvent plus être retrouvés.
+    # Quand un poteau n'a plus été recalé depuis field_filter_widen_after_s, la marge s'élargit donc
+    # progressivement (sur field_filter_widen_ramp_s) jusqu'à field_filter_margin_lost_mm, puis revient
+    # à la normale dès que tous les poteaux sont de nouveau recalés.
+    field_filter_margin_lost_mm: float = 400.0
+    field_filter_widen_after_s: float = 1.0
+    field_filter_widen_ramp_s: float = 2.0
 
 
 class StateAt(NamedTuple):

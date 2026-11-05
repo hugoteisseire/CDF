@@ -29,7 +29,7 @@ from .timebase import ClockAligner
 
 
 
-def _filter_points_in_field(points, ekf: PoseEKF):
+def _filter_points_in_field(points, ekf: PoseEKF, margin_mm=None):
     """Filtre les impacts hors terrain en projetant tous les points par lots NumPy.
 
     Seules les poses historiques sont nécessaires ici : appeler state_at() point par point
@@ -42,7 +42,7 @@ def _filter_points_in_field(points, ekf: PoseEKF):
 
     p = ekf.p
     xmin, ymin, xmax, ymax = p.field_mm
-    margin = p.field_filter_margin_mm
+    margin = p.field_filter_margin_mm if margin_mm is None else margin_mm
     xmin -= margin
     ymin -= margin
     xmax += margin
@@ -126,6 +126,7 @@ class Report:
     points: object = None  # Points lidar conservés après filtrage géométrique
     points_world_mm: object = None  # Impacts filtrés déjà projetés dans le repère terrain
     points_unverified: int = 0  # Points rejetés faute d'un état EKF fiable à leur horodatage
+    field_margin_mm: float = 0.0  # marge hors terrain utilisée pour ce tour (élargie si poteaux perdus)
 
 
 class Localizer:
@@ -175,6 +176,7 @@ class Localizer:
         self.lost = False
         self.relocalizations = 0
         self._bad_since = None     # début de la série de tours « poteaux vus mais aucune correction acceptée »
+        self._pole_last_ok = None  # instant (epoch s) du dernier recalage accepté de chaque poteau
         # cadence de l'odométrie
         self._odo_n = 0
         self._odo_win_t0 = time.perf_counter()
@@ -427,6 +429,17 @@ class Localizer:
 
             self._process_one(rev)
 
+    def _field_margin(self, t_s):
+        """Marge du filtre hors terrain pour ce tour : normale, puis élargie progressivement quand
+        au moins un poteau n'a plus été recalé depuis field_filter_widen_after_s."""
+        p = self.ekf.p
+        if self._pole_last_ok is None:
+            self._pole_last_ok = [t_s] * len(p.poles_mm)
+        lost_s = max(t_s - t for t in self._pole_last_ok)
+        k = (lost_s - p.field_filter_widen_after_s) / max(p.field_filter_widen_ramp_s, 1e-6)
+        k = min(1.0, max(0.0, k))
+        return p.field_filter_margin_mm + k * max(0.0, p.field_filter_margin_lost_mm - p.field_filter_margin_mm)
+
     def _process_one(self, rev):
         p = self.ekf.p
         # Délai entre la fin de l'acquisition du tour et le début de son traitement.
@@ -436,9 +449,10 @@ class Localizer:
         poll_ms = 0.0
         capped = cap_points(rev.points, self._cp)
         t1 = time.perf_counter()
-        # Les impacts hors du terrain élargi de 200 mm sont retirés avant le clustering.
-        # Les clusters transmis au rapport/visualiseur ne contiennent donc pas ces points.
-        in_field, points_world_mm, points_unverified = _filter_points_in_field(capped, self.ekf)
+        # Les impacts hors du terrain élargi (200 mm, jusqu'à 400 mm si des poteaux sont perdus) sont
+        # retirés avant le clustering. Les clusters transmis au rapport/visualiseur ne les contiennent pas.
+        margin_mm = self._field_margin(rev.t_end_ns / 1e9)
+        in_field, points_world_mm, points_unverified = _filter_points_in_field(capped, self.ekf, margin_mm)
         t_geom = time.perf_counter()
         clusters = find_clusters(in_field, self._cp)
         t2 = time.perf_counter()
@@ -478,6 +492,7 @@ class Localizer:
                 if ok:
                     accepted += 1
                     mahals.append(mahal)
+                    self._pole_last_ok[match.pole] = match.cluster.t_ns / 1e9
                 else:
                     rejected += 1
         t4 = time.perf_counter()
@@ -494,15 +509,26 @@ class Localizer:
                 self._bad_since = t_ref
             if t_ref - self._bad_since >= p.lost_after_s:
                 self.lost = True
-        if self.lost:
-            found = None # triangulate(self.ekf, clusters, self._reloc)
+        if self.lost and self._reloc.enabled:
+            # Perdu : les poteaux sont vus mais toutes les corrections sont refusées (typiquement un cap faux
+            # de 15-20° alors que le filtre se croit précis à ~5° : chi² > 9.21 à chaque tour, et à l'arrêt P
+            # ne grandit plus, donc le blocage serait définitif). On recalcule la pose directement à partir
+            # des poteaux (triangulation sur 2 ou 3 poteaux, refus en cas d'ambiguïté) et on repart de là.
+            # Les clusters du tour ont été filtrés « hors terrain » avec la pose FAUSSE : les poteaux, déjà en
+            # bordure de terrain, ont pu être effacés. On reclustérise donc TOUS les points du tour.
+            reloc_clusters = find_clusters(capped, self._cp)
+            found = triangulate(self.ekf, reloc_clusters, self._reloc)
             if found is not None:
                 with self._lock:
+                    old = self.ekf.pose
                     self.ekf.relocalize(found.x_mm, found.y_mm, found.theta_rad, t_ref)
                     self.lost = False
                     self.relocalizations += 1
                 self._bad_since = None
                 relocalized = True
+                print(f"[LOCALIZER] relocalisé par triangulation ({found.n_inliers} poteaux) : "
+                      f"({old[0]:.0f}, {old[1]:.0f}, {math.degrees(old[2]):.1f}°) -> "
+                      f"({found.x_mm:.0f}, {found.y_mm:.0f}, {math.degrees(found.theta_rad):.1f}°)", flush=True)
         t5 = time.perf_counter()
 
         # Latence complète : du premier timestamp du tour à la fin de la correction potentielle.
@@ -535,6 +561,7 @@ class Localizer:
             queue_wait_ms=queue_wait_ms, ekf_predict_ms=ekf_predict_ms,
             points=in_field,
             points_world_mm=points_world_mm, points_unverified=points_unverified,
+            field_margin_mm=margin_mm,
             corrections_accepted=accepted, corrections_rejected=rejected, mahal=mahals,
             lost=lost, relocalized=relocalized,
             reliable=(not lost) and math.hypot(std[0], std[1]) < p.safe_std_mm,

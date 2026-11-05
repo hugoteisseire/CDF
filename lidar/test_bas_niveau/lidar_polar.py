@@ -28,7 +28,14 @@ import time
 
 import numpy as np
 
-from rplidarc1.rplidarc1 import RPLidar
+import os
+import sys
+
+# Rangé dans lidar/test_bas_niveau/ : la bibliothèque rplidarc1 est dans le dossier parent (lidar/).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+from rplidarc1 import RPLidar
 
 
 # --------------------------------------------------------------------------- #

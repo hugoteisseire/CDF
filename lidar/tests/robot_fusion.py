@@ -4,7 +4,7 @@ Lancement depuis la racine du dépôt :
     python -m lidar.tests.robot_fusion --x0 1000 --y0 1000 --theta0-deg 0
     python -m lidar.tests.robot_fusion --x0 1000 --y0 1000 --theta0-deg 0 --visualize   # + fenêtre pygame de debug
 
---visualize ouvre la fenêtre pygame de test_fusion (poteaux, fenêtres de recherche, nuage de points, balise
+--visualize ouvre la fenêtre pygame de debug (poteaux, fenêtres de recherche, nuage de points, balise
 adverse, profilage) en AFFICHAGE SEUL : le pilotage reste celui de la page web / de la stratégie, il n'y a
 aucun pilotage clavier. Fermer la fenêtre (ECHAP ou croix) ne commande rien au robot.
 
@@ -87,6 +87,7 @@ class RobotController:
         self.target = None
         self.target_theta = None
         self._velocity = (0.0, 0.0, 0.0, "robot")
+        self._velocity_deadline = None      # monotonic ; None = consigne sans timeout
         self._lock = threading.Lock()
         self._last_state_sample = None
         self._last_fusion = {
@@ -111,11 +112,12 @@ class RobotController:
             self.target = None
             self.target_theta = None
             self._velocity = (0.0, 0.0, 0.0, "robot")
+            self._velocity_deadline = None
             self.motion_status = "stopped"
             self.motion_error = None
 
     def goto(self, x: float, y: float, speed_mm_s: float, acc_mm_s2: float,
-             theta_deg=None):
+             theta_deg=None, fastest_boost: int = -2):
         """Goto commun aux commandes stratégie et visualiseur.
 
         Le robot tourne pendant la translation vers (x, y) (dtheta calculé depuis la pose
@@ -143,7 +145,8 @@ class RobotController:
             ok = self.base.move_direction(
                 distance, angle,
                 speed_mm_s=min(speed_mm_s, self.base.max_speed_mm_s),
-                dtheta=dtheta, ramp_acc=ramp_acc, wait=False, verbose=False,
+                dtheta=dtheta, ramp_acc=ramp_acc, fastest_boost=fastest_boost,
+                wait=False, verbose=False,
             )
             if not ok:
                 raise RuntimeError("La commande de déplacement n'a pas pu être lancée")
@@ -204,6 +207,9 @@ class RobotController:
                 self.target = None
                 self.target_theta = None
                 self._velocity = (cmd["vx"], cmd["vy"], cmd["omega"], cmd["frame"])
+                # timeout optionnel (s) : sans nouvelle consigne avant l'échéance, tick() arrête le robot.
+                timeout = cmd.get("timeout")
+                self._velocity_deadline = (time.monotonic() + float(timeout)) if timeout else None
                 self.motion_status = "running"
                 self.motion_error = None
         elif kind == "cmd.goto":
@@ -215,6 +221,12 @@ class RobotController:
         with self._lock:
             mode = self.mode
             vx, vy, omega, frame = self._velocity
+            deadline = self._velocity_deadline
+        if mode == "velocity" and deadline is not None and time.monotonic() > deadline:
+            self.stop()
+            with self._lock:
+                self.motion_error = "velocity : consignes interrompues (timeout)"
+            mode = "idle"
         if mode == "velocity":
             if frame == "robot":
                 theta = self.localizer.status()["pose"][2]
@@ -391,11 +403,29 @@ OPPONENT_BEACON_DIAMETER_MM = 100.0
 OPPONENT_BEACON_WIDTH_MIN_MM = 0.0
 OPPONENT_BEACON_WIDTH_MAX_MM = 250.0
 OPPONENT_BEACON_MIN_POINTS = 2
+# La balise adverse n'est cherchée qu'à l'intérieur de la table réduite de OPPONENT_FIELD_INSET_MM sur
+# chaque bord : les clusters hors table (public, bordures, poteaux mal associés) sont ignorés, et un
+# robot collé au bord de la table n'est volontairement pas pris en compte.
+OPPONENT_FIELD_MM = (0.0, 0.0, 3000.0, 2000.0)   # xmin, ymin, xmax, ymax (mm)
+OPPONENT_FIELD_INSET_MM = 200.0                    # réglable avec --opponent-inset-mm
+
+
+def opponent_search_zone(field_mm=None, inset_mm=None):
+    """Rectangle (xmin, ymin, xmax, ymax) en mm où un centre de balise adverse est accepté."""
+    xmin, ymin, xmax, ymax = OPPONENT_FIELD_MM if field_mm is None else field_mm
+    m = OPPONENT_FIELD_INSET_MM if inset_mm is None else inset_mm
+    return xmin + m, ymin + m, xmax - m, ymax - m
 
 
 def find_opponent_cluster(clusters, pose, matched_poles, pole_radius_mm=50.0,
-                          lidar_offset_mm=(0.0, 0.0), lidar_zero_deg=0.0):
-    """Retourne la position terrain et le cluster de la balise adverse, ou None."""
+                          lidar_offset_mm=(0.0, 0.0), lidar_zero_deg=0.0,
+                          field_mm=None, inset_mm=None):
+    """Retourne la position terrain et le cluster de la balise adverse, ou None.
+
+    Seuls les clusters dont le centre estimé est dans la table réduite de inset_mm
+    (OPPONENT_FIELD_INSET_MM par défaut) sur chaque bord sont candidats.
+    """
+    zxmin, zymin, zxmax, zymax = opponent_search_zone(field_mm, inset_mm)
     x, y, theta = pose
     ox, oy = lidar_offset_mm
     lidar_x = x + ox * math.cos(theta) - oy * math.sin(theta)
@@ -418,6 +448,8 @@ def find_opponent_cluster(clusters, pose, matched_poles, pole_radius_mm=50.0,
             lidar_x + center_dist * math.cos(angle),
             lidar_y + center_dist * math.sin(angle),
         )
+        if not (zxmin <= position[0] <= zxmax and zymin <= position[1] <= zymax):
+            continue                    # hors de la table réduite : pas un adversaire exploitable
         score = (abs(width - OPPONENT_BEACON_DIAMETER_MM), -cluster.n_points)
         candidates.append((score, position, cluster))
 
@@ -550,6 +582,17 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
             screen.blit(small.render("Zone adverse (si balise non détectée)", True, (155, 105, 15)),
                         (zone_rect.x + 4, zone_rect.y + 4))
 
+            # Zone où la balise adverse est cherchée : table réduite de OPPONENT_FIELD_INSET_MM.
+            sxmin, symin, sxmax, symax = opponent_search_zone()
+            if sxmax > sxmin and symax > symin:
+                s_tl, s_br = xy((sxmin, symax)), xy((sxmax, symin))
+                search_rect = pygame.Rect(s_tl[0], s_tl[1], s_br[0] - s_tl[0], s_br[1] - s_tl[1])
+                pygame.draw.rect(screen, (200, 120, 190), search_rect, 1)
+                search_label = small.render(f"Recherche adversaire (table - {OPPONENT_FIELD_INSET_MM:.0f} mm)",
+                                            True, (150, 60, 140))
+                screen.blit(search_label, (search_rect.right - search_label.get_width() - 4,
+                                           search_rect.bottom - search_label.get_height() - 4))
+
             # Poteaux théoriques fixes du modèle.
             for i, pole in enumerate(poles_mm):
                 px, py = xy(pole)
@@ -596,13 +639,22 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
                     q0 = (lidar_xy[0] + r0 * math.cos(a1), lidar_xy[1] + r0 * math.sin(a1))
                     q1 = (lidar_xy[0] + r1 * math.cos(a1), lidar_xy[1] + r1 * math.sin(a1))
                     color = (220, 145, 30) if match.status != "matched" else (30, 160, 85)
-                    line(color, p0, p1, 2)
-                    line(color, q0, q1, 2)
-                    line(color, p1, q1, 1)
+                    # Fenêtre = secteur d'anneau [r0, r1] x [exp ± win] centré sur la mesure attendue.
+                    # (Avant : deux bords radiaux seuls ; une fenêtre très large, ±60° et ±1500 mm quand
+                    # la covariance a explosé dans une direction, devenait deux segments loin du poteau.)
+                    n_arc = 32
+                    arc = [a1 + (a0 - a1) * i / n_arc for i in range(n_arc + 1)]
+                    sector = ([(lidar_xy[0] + r1 * math.cos(a), lidar_xy[1] + r1 * math.sin(a)) for a in arc]
+                              + [(lidar_xy[0] + r0 * math.cos(a), lidar_xy[1] + r0 * math.sin(a))
+                                 for a in reversed(arc)])
+                    pygame.draw.lines(screen, color, True, [xy(q) for q in sector], 2)
                     expected = (lidar_xy[0] + match.exp_dist_mm * math.cos(a_center),
                                 lidar_xy[1] + match.exp_dist_mm * math.sin(a_center))
                     line((120, 125, 135), lidar_xy, expected, 1)
                     pygame.draw.circle(screen, color, xy(expected), 4)
+                    ex, ey = xy(expected)
+                    screen.blit(small.render(f"P{match.pole + 1} ±{match.win_dist_mm:.0f} mm ±{match.win_angle_deg:.0f}°",
+                                             True, color), (ex + 8, ey + 6))
                     if match.status == "matched" and match.cluster is not None:
                         # Position du centre du poteau observé, reconstruite depuis la mesure de surface.
                         dist = match.cluster.dist_mm + pole_radius_mm
@@ -655,7 +707,8 @@ def run_visualizer(report_queue, poles_mm, pole_radius_mm=50.0, lidar_offset_mm=
                                          (45, 50, 58)), (16, yy + 4))
                 screen.blit(small.render(
                     f"Points filtrés: {len(latest.points_world_mm) if latest.points_world_mm is not None else 0} | "
-                    f"horodatage non fiable: {latest.points_unverified}", True, (45, 50, 58)),
+                    f"horodatage non fiable: {latest.points_unverified} | "
+                    f"marge hors zone: {getattr(latest, 'field_margin_mm', 0.0):.0f} mm", True, (45, 50, 58)),
                     (16, yy + 24))
                 statuses = "   ".join(f"P{m.pole + 1}: {TAGS.get(m.status, m.status)}" for m in latest.result.matches)
                 screen.blit(font.render(statuses, True, (45, 50, 58)), (15, height - 28))
@@ -735,11 +788,14 @@ def main():
     parser.add_argument("--win-dist-max-mm", type=float, default=600.0)
     parser.add_argument("--win-angle-max-deg", type=float, default=25.0)
     parser.add_argument("--win-scale", type=float, default=AssocParams().window_scale)
+    parser.add_argument("--opponent-inset-mm", type=float, default=OPPONENT_FIELD_INSET_MM,
+                        help="balise adverse cherchée seulement dans la table réduite de cette marge (mm)")
     parser.add_argument("--socket", default=None, help="chemin socket stratégie (défaut CDF_ROBOT_SOCKET)")
     parser.add_argument("--visualize", action="store_true",
                         help="ouvre la fenêtre pygame de debug fusion (affichage seul : le pilotage reste "
                              "celui de la page web / de la stratégie)")
     args = parser.parse_args()
+    globals()["OPPONENT_FIELD_INSET_MM"] = args.opponent_inset_mm   # utilisé par find_opponent_cluster
 
     if args.visualize:
         # Échec immédiat, avant de démarrer moteurs et lidar, si pygame est absent.
@@ -850,10 +906,19 @@ def main():
         viz.on("goto", lambda args: controller.goto(
             float(args["x"]), float(args["y"]),
             float(args.get("speed", 300.0)), float(args.get("acc", 800.0)),
-            args.get("theta"),
+            args.get("theta"), int(args.get("fastest_boost", -2)),
         ))
         viz.on("rotate", lambda args: controller.rotate(float(args["theta"])))
         viz.on("estop", lambda args: controller.stop())
+        # Chase the Mouse : consigne de vitesse continue (mm/s, °/s) renvoyée ~20 Hz par la page ;
+        # timeout borné à [0.1, 2] s : le robot s'arrête seul si la page cesse d'envoyer.
+        viz.on("velocity", lambda args: controller.apply({
+            "type": "cmd.velocity",
+            "vx": float(args.get("vx", 0.0)), "vy": float(args.get("vy", 0.0)),
+            "omega": float(args.get("omega", 0.0)),
+            "frame": "robot" if args.get("frame") == "robot" else "field",
+            "timeout": min(2.0, max(0.1, float(args.get("timeout", 0.5)))),
+        }))
         server_kwargs = {} if args.socket is None else {"path": args.socket}
         server = RobotProtocolServer(controller.state, **server_kwargs).start()
 
@@ -869,9 +934,30 @@ def main():
 
             Elle tourne dans un thread dédié pour laisser le thread principal à pygame (--visualize).
             """
+            # Diagnostic affichage web : durée des cycles et des envois vers le serveur viz.
+            vdiag = {"t0": time.monotonic(), "ticks": 0, "tick_max": 0.0, "send_max": 0.0,
+                     "slow": 0, "fail": 0, "seq": 0}
+
+            def vstamp():
+                t = time.time()
+                return time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t * 1000) % 1000:03d}"
+
+            def vsend(layer, data):
+                t0 = time.perf_counter()
+                ok = viz.send(layer, data)
+                dt = (time.perf_counter() - t0) * 1e3
+                vdiag["send_max"] = max(vdiag["send_max"], dt)
+                if not ok:
+                    vdiag["fail"] += 1
+                if dt > 50:
+                    vdiag["slow"] += 1
+                    print(f"[VIZ robot] {vstamp()} envoi lent : {dt:.0f} ms (couche {layer}, "
+                          f"seq {vdiag['seq']})", flush=True)
+
             try:
                 next_tick = time.monotonic()
                 while not stop_event.is_set():
+                    t_tick = time.perf_counter()
                     while True:
                         event = server.poll(timeout=0.0)
                         if event is None:
@@ -891,8 +977,10 @@ def main():
                     robot_state = snapshot["robot"]
                     motion_state = snapshot["motion"]
                     fusion_state = snapshot["fusion"]
-                    viz.send("robot", {
+                    vdiag["seq"] += 1
+                    vsend("robot", {
                         **robot_state,
+                        "seq": vdiag["seq"], "t_robot_ms": time.time() * 1000.0,
                         "radius": base.robot.radius,
                         "target": ({"x": motion_state["target_x"], "y": motion_state["target_y"]}
                                    if motion_state["target_x"] is not None else None),
@@ -904,8 +992,22 @@ def main():
                         "std": {"x": fusion_state["std_x"], "y": fusion_state["std_y"],
                                 "theta": fusion_state["std_theta"]},
                     })
-                    viz.send("opponent", snapshot["opponent"])
-                    viz.send("fusion", fusion_state)
+                    vsend("opponent", snapshot["opponent"])
+                    vsend("fusion", fusion_state)
+
+                    tick_ms = (time.perf_counter() - t_tick) * 1e3
+                    vdiag["ticks"] += 1
+                    vdiag["tick_max"] = max(vdiag["tick_max"], tick_ms)
+                    if tick_ms > 200:
+                        print(f"[VIZ robot] {vstamp()} cycle de contrôle bloqué {tick_ms:.0f} ms "
+                              f"(seq {vdiag['seq']})", flush=True)
+                    now_m = time.monotonic()
+                    if now_m - vdiag["t0"] >= 2.0:
+                        print(f"[VIZ robot] {vstamp()} {vdiag['ticks'] / (now_m - vdiag['t0']):4.1f} cycles/s | "
+                              f"cycle max {vdiag['tick_max']:5.1f} ms | envoi max {vdiag['send_max']:5.1f} ms | "
+                              f"envois >50 ms {vdiag['slow']} | échecs {vdiag['fail']} | seq {vdiag['seq']}",
+                              flush=True)
+                        vdiag.update(t0=now_m, ticks=0, tick_max=0.0, send_max=0.0, slow=0, fail=0)
 
                     if loc.error is not None:
                         raise RuntimeError(f"Erreur localizer: {loc.error!r}")
