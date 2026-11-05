@@ -23,7 +23,7 @@
   button:hover { background: #4a525e; }
   button.danger { background: #b3261e; font-weight: 700; }
   .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
-  #robotinfo { font: 12px ui-monospace, monospace; white-space: pre; color: #c9d1d9; }
+  #robotinfo, #oppinfo { font: 12px ui-monospace, monospace; white-space: pre; color: #c9d1d9; }
   #toast { position: fixed; right: 14px; bottom: 14px; background: #b3261e; padding: 8px 12px;
            border-radius: 6px; display: none; max-width: 280px; }
   @media (max-width: 800px) {
@@ -37,9 +37,10 @@
 <div id="app">
   <div id="main"><canvas id="cv"></canvas><div id="coords"></div></div>
   <aside>
-    <h2>Serveur</h2><div id="status"></div>
+    <h2>Serveur</h2><div id="status"></div><div style="font-size:11px;color:#6b7686">page v3 (correctif cible robot)</div>
     <h2>Programmes</h2><div id="clients"></div>
     <h2>Robot</h2><div id="robotinfo">pas de données</div>
+    <h2>Adversaire</h2><div id="oppinfo">pas de données</div>
     <h2>Couches affichées</h2><div id="layers"></div>
     <h2>Affichage</h2>
     <label><input type="checkbox" id="flip"> Inverser gauche/droite (changer de côté)</label>
@@ -72,7 +73,8 @@ const DEFAULTS = {
   STRATEGIES: ["strategie_1", "strategie_2"],   // liste du menu « choisir la stratégie »
   MODES: [                           // [commande envoyée, texte affiché]
     ["none", "Aucune action"],
-    ["goto", "Envoyer le robot ici (goto)"],
+    ["goto", "Envoyer le robot ici (goto, glisser = angle d'arrivée)"],
+    ["rotate", "Orienter le robot (glisser = angle cible)"],
     ["set_robot_pose", "Placer le robot (glisser = orientation)"],
     ["set_opponent", "Placer l'adversaire"],
     ["add_element", "Ajouter un élément (glisser = orientation)"],
@@ -128,7 +130,27 @@ function setLayer(name, data) {
   layers[name] = { data, t: performance.now() };
   if (isNew) renderLayers();
   if (name === "robot") onRobot(data);
+  if (name === "opponent") onOpponent(data);
 }
+// Dernière position adverse réellement détectée (le robot envoie aussi des trames "valid: false")
+let lastOpp = null;   // {x, y, t (ms, performance.now), width, n}
+function onOpponent(d) {
+  if (d && d.valid && typeof d.x === "number") {
+    lastOpp = { x: d.x, y: d.y, t: performance.now(), width: d.width_mm, n: d.n_points };
+  }
+  renderOpponentInfo();
+}
+function renderOpponentInfo() {
+  const box = $("oppinfo");
+  if (!lastOpp) { box.textContent = layers.opponent ? "non détecté" : "pas de données"; return; }
+  const age = (performance.now() - lastOpp.t) / 1000;
+  const cur = layers.opponent && layers.opponent.data && layers.opponent.data.valid;
+  box.textContent =
+    `x ${lastOpp.x.toFixed(0)} mm   y ${lastOpp.y.toFixed(0)} mm\n` +
+    `${cur ? "détecté" : "perdu"} · vu il y a ${age.toFixed(1)} s\n` +
+    `largeur ${typeof lastOpp.width === "number" ? lastOpp.width.toFixed(0) : "-"} mm   pts ${lastOpp.n ?? "-"}`;
+}
+setInterval(renderOpponentInfo, 200);
 function sendCmd(cmd, args = {}) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", cmd, args }));
   else toast("Pas de connexion au serveur");
@@ -144,7 +166,7 @@ function onRobot(d) {
   }
   const f = (v, n = 0) => (typeof v === "number" ? v.toFixed(n) : "-");
   $("robotinfo").textContent =
-    `x ${f(d.x)} mm   y ${f(d.y)} mm\nθ ${f(d.theta, 1)}°\nv ${f(d.v, 2)} m/s   ω ${f(d.omega, 1)} °/s`;
+    `x ${f(d.x)} mm   y ${f(d.y)} mm\nθ ${f(d.theta, 1)}°\nv ${f(typeof d.v === "number" ? d.v : Math.hypot(d.vx || 0, d.vy || 0) / 1000, 2)} m/s   ω ${f(d.omega, 1)} °/s`;
 }
 function renderClients() {
   $("clients").innerHTML = clients.length ? "" : "aucun programme connecté";
@@ -268,8 +290,9 @@ function drawItems(items) {   // éléments de jeu : [{id, x, y, theta, value, w
     ctx.textAlign = "start";
   }
 }
-function drawOpponent(l) {
-  const d = l.data, age = (performance.now() - l.t) / 1000, old = age > 2;
+function drawOpponent() {
+  if (!lastOpp) return;
+  const d = lastOpp, age = (performance.now() - d.t) / 1000, old = age > 2;
   ctx.lineWidth = 2;
   circle(d.x, d.y, d.rmax || 200, old ? "rgba(220,60,60,.06)" : "rgba(220,60,60,.18)", "#dc3c3c", old ? [6, 4] : null);
   circle(d.x, d.y, 25, "#dc3c3c");
@@ -277,19 +300,27 @@ function drawOpponent(l) {
 }
 function drawRobot(d) {
   if (typeof d.x !== "number") return;
-  const r = d.r || 150, a = ((d.theta || 0) * Math.PI) / 180;
+  const r = d.r || d.radius || 150, a = ((d.theta || 0) * Math.PI) / 180;
   ctx.lineWidth = 2; ctx.strokeStyle = "#1f6feb99";
   ctx.beginPath(); trail.forEach(([x, y], i) => (i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)))); ctx.stroke();
   if (d.target) {
-    const [x, y] = d.target; ctx.strokeStyle = "#1a7f37"; ctx.lineWidth = 2;
+    // le robot envoie la cible sous forme d'objet {x, y} ; on accepte aussi [x, y]
+    const [x, y] = Array.isArray(d.target) ? d.target : [d.target.x, d.target.y];
+    ctx.strokeStyle = "#1a7f37"; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(sx(x) - 8, sy(y) - 8); ctx.lineTo(sx(x) + 8, sy(y) + 8);
     ctx.moveTo(sx(x) + 8, sy(y) - 8); ctx.lineTo(sx(x) - 8, sy(y) + 8); ctx.stroke();
   }
   circle(d.x, d.y, r, ROBOT_FILL, ROBOT_STROKE);
+  if (typeof d.target_theta === "number") {   // angle cible en cours (goto avec angle / rotate)
+    const ta = (d.target_theta * Math.PI) / 180;
+    ctx.beginPath(); ctx.moveTo(sx(d.x), sy(d.y));
+    ctx.lineTo(sx(d.x + Math.cos(ta) * r * 1.4), sy(d.y + Math.sin(ta) * r * 1.4));
+    ctx.lineWidth = 2; ctx.strokeStyle = "#1a7f37"; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+  }
   ctx.beginPath(); ctx.moveTo(sx(d.x), sy(d.y));
   ctx.lineTo(sx(d.x + Math.cos(a) * r), sy(d.y + Math.sin(a) * r)); ctx.lineWidth = 3; ctx.strokeStyle = "#0b3d91"; ctx.stroke();
 }
-function draw() {
+function drawFrame() {
   const cw = cv.width / dpr, ch = cv.height / dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, cw, ch);
   const s = Math.min(cw / (W + 2 * M), ch / (H + 2 * M));
@@ -309,12 +340,12 @@ function draw() {
     if (l.data.shapes) drawShapes(l.data.shapes);
     if (l.data.items) drawItems(l.data.items);
   }
-  if (layers.opponent && !hidden.has("opponent")) drawOpponent(layers.opponent);
+  if (!hidden.has("opponent")) drawOpponent();
   if (layers.robot && !hidden.has("robot")) drawRobot(layers.robot.data);
   if (down && cur) {   // aperçu pendant un glisser
     ctx.setLineDash([5, 4]); ctx.lineWidth = 2; ctx.strokeStyle = "#444";
     const far = Math.hypot(cur.px - down.px, cur.py - down.py) > 15;
-    if (mode === "set_robot_pose") { ctx.beginPath(); ctx.moveTo(down.px, down.py); ctx.lineTo(cur.px, cur.py); ctx.stroke(); }
+    if (mode === "set_robot_pose" || mode === "goto" || mode === "rotate") { ctx.beginPath(); ctx.moveTo(down.px, down.py); ctx.lineTo(cur.px, cur.py); ctx.stroke(); }
     let pv = null;
     if (mode === "add_element") pv = { x: down.x, y: down.y, theta: far ? angleDeg(down.x, down.y, cur.x, cur.y) : 0 };
     else if (mode === "move_element" && dragEl) pv = { ...dragEl, x: cur.x, y: cur.y };
@@ -322,6 +353,9 @@ function draw() {
     if (pv) { tracePoly(corners(pv)); ctx.stroke(); }
     ctx.setLineDash([]);
   }
+}
+function draw() {   // une erreur de dessin ne doit jamais arrêter la boucle d'affichage
+  try { drawFrame(); } catch (e) { console.error("draw:", e); }
   requestAnimationFrame(draw);
 }
 
@@ -360,7 +394,13 @@ cv.addEventListener("pointerup", e => {
   if (!down) return;
   const p = point(e), moved = Math.hypot(p.px - down.px, p.py - down.py) > 15;
   const x = Math.round(down.x), y = Math.round(down.y);
-  if (mode === "goto") sendCmd("goto", { x, y });
+  if (mode === "goto") {
+    const args = { x, y };
+    if (moved) args.theta = angleDeg(down.x, down.y, p.x, p.y);   // glisser = angle d'arrivée
+    sendCmd("goto", args);
+  } else if (mode === "rotate") {
+    if (moved) sendCmd("rotate", { theta: angleDeg(down.x, down.y, p.x, p.y) });   // angle cible
+  }
   else if (mode === "set_opponent") sendCmd("set_opponent", { x, y });
   else if (mode === "add_element") {
     const args = { x, y };

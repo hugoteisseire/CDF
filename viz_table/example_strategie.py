@@ -130,7 +130,7 @@ def get_robot_pose():
 
 
 # ---- API stratégie : exemples d'appels depuis la logique de match ----------
-def send_goto(x, y, speed=500.0, acc=800.0, theta=None):
+def send_goto(x, y, speed=1000.0, acc=1200.0, theta=None):
     """Demande un déplacement ; speed en mm/s, acc en mm/s², angle en degrés."""
     return robot_link.goto(x, y, speed=speed, acc=acc, theta=theta)
 

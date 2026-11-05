@@ -27,7 +27,7 @@ class HolonomicBase:
     # avec tests/test_odometry.py, puis passer à +1 si le test affiche le signe inverse.
     POSITION_SIGN = -1
 
-    def __init__(self, robot: Robot, group: MotorGroup, max_speed_mm_s: float = 600.0,
+    def __init__(self, robot: Robot, group: MotorGroup, max_speed_mm_s: float = 1500.0,
                  max_omega_rad_s: float = 3.0, watchdog_s: float = 0.3,
                  odometry_hz: float = 100.0):
         """
@@ -190,11 +190,16 @@ class HolonomicBase:
             return (float(self.robot.pos[0]), float(self.robot.pos[1]),
                     float(self.robot.angle), self._pose_time)
 
-    def reset_pose(self, x: float, y: float, theta: float) -> None:
-        """Recale la pose (ex. contre une bordure, ou depuis le lidar/OTOS)."""
+    def reset_pose(self, x: float, y: float, theta: float):
+        """Recale la pose (ex. contre une bordure, ou depuis le lidar/OTOS).
+
+        Renvoie l'ancienne pose (x mm, y mm, θ rad), lue dans la même section critique que le
+        recalage : Localizer.resync_odometry s'en sert pour masquer le saut à l'EKF."""
         with self._odo_lock:
+            old = (float(self.robot.pos[0]), float(self.robot.pos[1]), float(self.robot.angle))
             self.robot.pos[0], self.robot.pos[1] = x, y
             self.robot.angle = theta
+            return old
 
     def odometry_stats(self):
         """(distance parcourue en mm, rotation cumulée en degrés)"""

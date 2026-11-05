@@ -53,8 +53,8 @@ class TeleopDriver:
     Les accélérations MKS sont mises au maximum : c'est la rampe logicielle qui décide.
     """
 
-    def __init__(self, robot, motors, speed_mm_s=60.0, rot_rad_s=1.0,
-                 accel_mm_s2=1000.0, rot_accel_rad_s2=4.0, mks_acc=200):
+    def __init__(self, robot, motors, speed_mm_s=60.0, rot_rad_s=1.5,
+                 accel_mm_s2=1000.0, rot_accel_rad_s2=3.0, mks_acc=200):
         self.robot, self.motors = robot, motors
         self.speed, self.rot = speed_mm_s, rot_rad_s
         self.accel, self.rot_accel = accel_mm_s2, rot_accel_rad_s2

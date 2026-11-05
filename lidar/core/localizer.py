@@ -6,7 +6,8 @@ Un thread unique, séparé de la lecture du lidar, fait deux choses en boucle :
      poteaux (étape 3), correction séquentielle de la pose à l'instant de chaque cluster (étape 4),
      détection de perte et relocalisation par triangulation (étape 6).
 
-La dérive d'odométrie (étape 6, point 3) n'est volontairement pas traitée : l'odométrie est considérée juste.
+La dérive d'odométrie est traitée par resync_odometry() : l'odométrie est recalée sur la pose EKF, et le saut
+correspondant est retiré de ce que voit l'EKF (sinon la correction serait comptée deux fois).
 
 Les trois fonctions d'entrée sont volontairement simples (pose_source, rev_queue, init_pose) pour
 pouvoir tester sans robot. `log_path` écrit un journal CSV (un tour par ligne) pour l'analyse après coup.
@@ -25,6 +26,8 @@ from .lidar_clusters import ClusterParams, cap_points, find_clusters
 from .pole_association import AssocParams, AssocResult, associate_poles
 from .relocalize import RelocParams, triangulate
 from .timebase import ClockAligner
+
+
 
 def _filter_points_in_field(points, ekf: PoseEKF):
     """Filtre les impacts hors terrain en projetant tous les points par lots NumPy.
@@ -153,6 +156,10 @@ class Localizer:
         self._last_odo_epoch_s = None
         self._last_odo_read_epoch_s = None
         self._ekf_predict_ms = 0.0
+        # Décalage cumulé (x mm, y mm, θ rad) dû aux recalages de l'odométrie : l'EKF reçoit
+        # pose_source() - décalage, donc une trajectoire continue malgré les reset_pose.
+        self._odo_offset = (0.0, 0.0, 0.0)
+        self._odo_rebase_lock = threading.Lock()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -172,6 +179,9 @@ class Localizer:
         self._odo_n = 0
         self._odo_win_t0 = time.perf_counter()
         self._odo_hz = 0.0
+        # Diagnostic : nombre / pire durée des prédictions odométriques depuis le dernier rapport
+        self._ekf_predict_n = 0
+        self._ekf_predict_max_ms = 0.0
         # Latence de bout en bout : durée acquisition + attente en file + traitement/correction.
         # Fenêtre glissante indexée sur l'instant de fin de traitement (horloge monotone).
         self._e2e_samples = deque()
@@ -210,6 +220,25 @@ class Localizer:
                     "revs_processed": self.revs_processed, "revs_skipped": self.revs_skipped,
                     "odo_hz": self._odo_hz, "acq_to_correction_ms": self._e2e_last_ms,
                     "acq_to_correction_avg_5s_ms": self._e2e_avg_5s_ms}
+
+    def resync_odometry(self, reset_pose_fn: Callable) -> bool:
+        """Recale l'odométrie sur la pose EKF sans perturber l'EKF.
+
+        reset_pose_fn(x, y, theta) doit recaler l'odométrie et renvoyer son ANCIENNE pose
+        (x, y, theta) : c'est HolonomicBase.reset_pose. Le saut (nouvelle - ancienne pose) est
+        ajouté au décalage retiré dans _poll_odometry : l'EKF ne voit aucun déplacement fictif,
+        mais les déplacements suivants sont intégrés à partir d'un cap et d'une position justes.
+        Sans effet (renvoie False) tant que l'EKF n'est pas prêt, fiable et non perdu.
+        """
+        status = self.status()
+        if not status["reliable"]:
+            return False
+        ex, ey, eth = status["pose"]
+        with self._odo_rebase_lock:
+            ox, oy, oth = self._odo_offset
+            ax, ay, ath = reset_pose_fn(ex, ey, eth)
+            self._odo_offset = (ox + ex - ax, oy + ey - ay, oth + eth - ath)
+        return True
 
     # ------------------------------------------------------------------ journal
     def _open_log(self):
@@ -267,7 +296,10 @@ class Localizer:
             self._odo_win_t0 = now
 
     def _poll_odometry(self):
-        x, y, th, t = self._pose_source()
+        with self._odo_rebase_lock:     # lecture + décalage cohérents vis-à-vis d'un recalage
+            x, y, th, t = self._pose_source()
+            ox, oy, oth = self._odo_offset
+        x, y, th = x - ox, y - oy, th - oth
         if t is None or t == self._last_odo_t:
             return
         self._last_odo_t = t
@@ -285,7 +317,10 @@ class Localizer:
                 self.ekf.reset(*self._init_pose, ts)
             _ekf_t0 = time.perf_counter()
             self.ekf.predict_odometry(x, y, th, ts)
-            self._ekf_predict_ms += (time.perf_counter() - _ekf_t0) * 1000.0
+            _dt = (time.perf_counter() - _ekf_t0) * 1000.0
+            self._ekf_predict_ms += _dt
+            self._ekf_predict_n += 1
+            self._ekf_predict_max_ms = max(self._ekf_predict_max_ms, _dt)
             pose = self.ekf.pose
         self._tick_odo_rate()
 
@@ -397,6 +432,8 @@ class Localizer:
         # Délai entre la fin de l'acquisition du tour et le début de son traitement.
         queue_wait_ms = max(0.0, (time.time_ns() - rev.t_end_ns) / 1e6)
         t0 = time.perf_counter()
+        c0 = time.thread_time()      # temps CPU réellement consommé par ce thread (diagnostic)
+        poll_ms = 0.0
         capped = cap_points(rev.points, self._cp)
         t1 = time.perf_counter()
         # Les impacts hors du terrain élargi de 200 mm sont retirés avant le clustering.
@@ -410,7 +447,9 @@ class Localizer:
         t_ref = (rev.t_start_ns + rev.t_end_ns) / 2e9
         # Le clustering peut prendre plusieurs dizaines de ms : rafraîchir l'odométrie
         # avant l'association et les corrections afin que l'historique couvre les mesures.
+        _tp = time.perf_counter()
         self._poll_odometry()
+        poll_ms += (time.perf_counter() - _tp) * 1e3
         res = associate_poles(self.ekf, clusters, t_ref, self._assoc)
         t3 = time.perf_counter()
 
@@ -421,8 +460,12 @@ class Localizer:
         mahals = []
         # Nouvelle lecture juste avant la correction : l'association peut elle aussi prendre
         # du temps et ne doit pas laisser l'EKF derrière l'instant de mesure.
+        _tp = time.perf_counter()
         self._poll_odometry()
+        poll_ms += (time.perf_counter() - _tp) * 1e3
+        _tl = time.perf_counter()
         with self._lock:
+            lock_wait_ms = (time.perf_counter() - _tl) * 1e3
             for match in res.matches:
                 if match.status != "matched" or match.cluster is None:
                     continue
@@ -483,6 +526,8 @@ class Localizer:
         # Inclut toutes les prédictions odométriques effectuées depuis le rapport précédent,
         # y compris celles déclenchées pendant le traitement de ce tour.
         ekf_predict_ms = self._ekf_predict_ms
+        cpu_ms = (time.thread_time() - c0) * 1e3
+        pred_n, pred_max = self._ekf_predict_n, self._ekf_predict_max_ms
         report = Report(
             rev.number, t_ref, len(rev.points), len(capped), len(clusters), res, pose, std,
             (t5 - t0) * 1e3, clusters=clusters,
@@ -499,9 +544,13 @@ class Localizer:
                         "correct": (t4 - t3) * 1e3,
                         "ekf_total": ekf_predict_ms + (t4 - t3) * 1e3,
                         "relocalize": (t5 - t4) * 1e3,
-                        "total": (t5 - t0) * 1e3},
+                        "total": (t5 - t0) * 1e3,
+                        "cpu": cpu_ms, "poll": poll_ms, "lock_wait": lock_wait_ms,
+                        "predict_n": pred_n, "predict_max": pred_max},
         )
         self._ekf_predict_ms = 0.0
+        self._ekf_predict_n = 0
+        self._ekf_predict_max_ms = 0.0
         self._write_log(report)
         if self._on_report is not None:
             self._on_report(report)

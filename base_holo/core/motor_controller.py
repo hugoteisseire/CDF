@@ -697,7 +697,7 @@ class MotorGroup:
     # =============================
 
     def move_direction(self, distance_mm: float, direction_angle: float, speed_mm_s: float = 50,
-                       dtheta: float = 0.0, ramp_acc: int = 220, fastest_boost: int = 0,
+                       dtheta: float = 0.0, ramp_acc: int = 220, fastest_boost: int = -2,
                        wait: bool = True, verbose: bool = True) -> bool:
         """
         Déplace le robot de `distance_mm` dans la direction `direction_angle` (repère global,

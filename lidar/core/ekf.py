@@ -51,7 +51,7 @@ class EkfParams:
     # Variance ajoutée à chaque pas = err² x distance du pas x distance de référence, donc après
     # 1 m (= la référence) l'écart-type vaut err x 1 m = 20 mm.
     odo_trans_err: float = 0.01           # 6 % de la distance : incertitude odométrique multipliée par 3
-    odo_rot_err: float = 0.01             # 3 % de l'angle : incertitude odométrique multipliée par 3
+    odo_rot_err: float = 0.02            # 3 % de l'angle : incertitude odométrique multipliée par 3
     odo_ref_dist_mm: float = 1000.0
     odo_ref_angle_rad: float = 1.0
 
