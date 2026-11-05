@@ -128,6 +128,7 @@ class Response:
     logger = logging.getLogger(__name__)
 
     RESPONSE_DESCRIPTOR_LENGTH = 7  # Length of the response descriptor in bytes
+    FRAME_PERIOD_NS = 200_000       # RPLIDAR C1 : 5000 mesures/s, une trame toutes les 200 µs
 
     @staticmethod
     def parse_response_descriptor(serial: serial.Serial) -> Tuple[int, ResponseMode]:
@@ -234,43 +235,57 @@ class Response:
                 indexed by angle. If None, results are only added to the queue.
         """
         Response.logger.debug("Creating multiresponse coroutine.")
-        byte_error_handling = False
-        data_out_buffer: bytes = bytes(0)
+        # Lecture PAR BLOCS : tout ce qui attend dans le port est lu en un seul appel, puis découpé en
+        # trames. L'ancienne lecture trame par trame faisait ~2 appels système par point (5000 points/s) :
+        # chacun rend le GIL et doit le reprendre. Dès qu'un autre thread du processus calculait, le
+        # lecteur prenait du retard, et tant que le port contenait >= 5 octets il ne cédait JAMAIS la
+        # main à la boucle asyncio (put() sur une file non bornée ne suspend pas) : la tâche de vidage
+        # ne tournait plus, aucun tour n'était publié pendant parfois plus d'une seconde, puis tout
+        # arrivait d'un coup avec des horodatages déjà vieux (tours « trop anciens » pour l'EKF).
+        buf = b""
+        last_t_ns = 0
         while not stop_event.is_set():
-            if serial.in_waiting < 5:
-                Response.logger.debug("Waiting for data.")
-                await asyncio.sleep(0.01)
+            waiting = serial.in_waiting
+            if len(buf) + waiting < length:
+                await asyncio.sleep(0.002)
                 continue
-
-            if not byte_error_handling:
-                data_out_buffer = serial.read(length)
-            elif data_out_buffer:
-                data_out_buffer = data_out_buffer[1:] + serial.read(1)
-
-            if not Response._check_byte_alignment(
-                data_out_buffer[0], data_out_buffer[1]
-            ):
-                byte_error_handling = True
-                Response.logger.warning(
-                    "Verification bytes not matching. Continuing one byte along."
-                )
-                continue
-            else:
-                byte_error_handling = False
-            # Horodatage epoch pris immédiatement après réception de la trame.
+            if waiting:
+                buf += serial.read(waiting)
+            # Horodatage epoch pris immédiatement après réception du bloc.
             # Ne pas utiliser monotonic_ns ici : ClockAligner serait initialisé plus tard
             # par le thread de découpage, après accumulation possible d'une file de points,
             # ce qui décalerait artificiellement les mesures dans le futur.
             t_rx_ns = time.time_ns()
-            parsed_tuple = Response._parse_simple_scan_result(data_out_buffer)
-            if parsed_tuple is None:
-                continue
-            quality, angle, distance = parsed_tuple
-            
-            distance = None if distance == 0 else distance
-            if output_dict is not None:
-                output_dict[angle] = distance
-            await output_queue.put({"q": quality,"a_deg": angle,"d_mm": distance,"t_rx_ns": t_rx_ns,})
+
+            frames = []
+            i, end = 0, len(buf)
+            while end - i >= length:
+                if not Response._check_byte_alignment(buf[i], buf[i + 1]):
+                    Response.logger.warning(
+                        "Verification bytes not matching. Continuing one byte along."
+                    )
+                    i += 1
+                    continue
+                frames.append(buf[i:i + length])
+                i += length
+            buf = buf[i:]
+
+            # Les trames d'un même bloc sont arrivées à la cadence du lidar : la dernière à t_rx_ns, les
+            # précédentes FRAME_PERIOD_NS plus tôt chacune (sans jamais remonter avant le bloc précédent).
+            n = len(frames)
+            for k, frame in enumerate(frames):
+                t_ns = max(t_rx_ns - (n - 1 - k) * Response.FRAME_PERIOD_NS, last_t_ns + 1)
+                last_t_ns = t_ns
+                parsed_tuple = Response._parse_simple_scan_result(frame)
+                if parsed_tuple is None:
+                    continue
+                quality, angle, distance = parsed_tuple
+                distance = None if distance == 0 else distance
+                if output_dict is not None:
+                    output_dict[angle] = distance
+                output_queue.put_nowait({"q": quality, "a_deg": angle, "d_mm": distance, "t_rx_ns": t_ns})
+            # Céder la main après chaque bloc : la tâche de vidage tourne au moins toutes les quelques ms.
+            await asyncio.sleep(0)
         output_queue.task_done()
         Response.logger.info("Completed processing.")
         await asyncio.sleep(0)
@@ -320,7 +335,10 @@ class Response:
                 - distance: The distance of the scan point in millimeters
         """
         quality = (response[0] >> 2) & 0b111111
-        angle = ((response[1] & 0b01111111) | (response[2] << 7)) / 64
+        # Protocole RPLIDAR, mode SCAN (0x20) : octets 1-2 = u16 little endian
+        # « check_bit:1 ; angle_q6:15 ». Le bit 0 de l'octet 1 est le bit C (toujours 1),
+        # il faut donc décaler de 1 (SL_LIDAR_RESP_MEASUREMENT_ANGLE_SHIFT du SDK Slamtec).
+        angle = ((response[1] >> 1) | (response[2] << 7)) / 64
         angle = round(
             (round(angle * 3) / 3), 2
         )  # round to closest 0.33 which is precision of rplidarc1

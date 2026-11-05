@@ -68,6 +68,12 @@ class EkfParams:
     # --- historique ---
     history_s: float = 1.0                # au moins 1 tour de lidar (100 ms) ; 1 s laisse de la marge
     clamp_tol_s: float = 0.10             # tolérance temporelle élargie à 100 ms
+    # Pas minimal entre deux états de l'historique. Le coût de _record() et de correct_pole()
+    # croît en N² (N = états dans history_s), donc en f_odo³ par seconde : sans borne, passer de
+    # 40 à 86 Hz d'odométrie multiplie le coût EKF par ~11. Plus rapproché que ce pas, le nouvel
+    # échantillon remplace le dernier état (en O(N)) : la pose courante reste à jour à chaque
+    # échantillon, seule la résolution de l'historique est bornée. 20 ms => N <= ~50 sur 1 s.
+    history_min_dt_s: float = 0.02
 
     # --- perte et relocalisation (étape 6) ---
     lost_after_s: float = 1.0             # des poteaux vus mais jamais acceptés pendant ce temps : on se dit perdu
@@ -172,6 +178,17 @@ class PoseEKF:
         if self._ht and t_s <= self._ht[-1]:       # même instant : remplace la dernière entrée
             self._hx[-1], self._hP[-1] = self.x.copy(), self.P.copy()
             self._hC[-1, -1] = self.P.copy()
+            return
+        if (transition_F is not None and len(self._ht) >= 2
+                and self._ht[-1] - self._ht[-2] < self.p.history_min_dt_s):
+            # Le dernier état x_n devient F x_n + bruit : Cov(x_i, x_nouveau) = Cov(x_i, x_n) F',
+            # et seule la dernière ligne/colonne de _hC change (O(N) au lieu de O(N²)).
+            cross = self._hC[:-1, -1] @ transition_F.T
+            self._hC[:-1, -1] = cross
+            self._hC[-1, :-1] = cross.transpose(0, 2, 1)
+            self._hC[-1, -1] = self.P
+            self._ht[-1] = t_s
+            self._hx[-1], self._hP[-1] = self.x.copy(), self.P.copy()
             return
         if not self._ht:
             self._hC = self.P.reshape((1, 1, 3, 3)).copy()
